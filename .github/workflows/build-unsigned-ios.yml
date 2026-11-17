@@ -1,0 +1,110 @@
+name: Build unsigned iOS IPA (free GitHub account)
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+# Least privilege: the workflow only needs to read the repository and upload
+# artifacts. No packages, deployments or contents write access are requested.
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned:
+    runs-on: macos-15          # Xcode + iPhoneOS SDK preinstalled
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record toolchain and disk space
+        run: |
+          set -o pipefail
+          mkdir -p build/ios
+          {
+            echo "=== date ==="; date -u
+            echo "=== xcodebuild ==="; xcodebuild -version
+            echo "=== iPhoneOS SDK ==="; xcrun --sdk iphoneos --show-sdk-version
+            echo "=== disk ==="; df -h .
+            echo "=== runner ==="; echo "${RUNNER_OS} ${RUNNER_ARCH} ${RUNNER_IMAGE:-unknown}"
+          } | tee build/ios/toolchain.txt
+
+      - name: Install Rust iOS target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      # Rust and Xcode never run concurrently: they are separate, ordered steps.
+      - name: Cache Rust artifacts (avoid unnecessary full rebuilds)
+        uses: actions/cache@v4
+        with:
+          path: |
+            rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-ios-rust-${{ hashFiles('rust/Cargo.lock', 'rust/**/Cargo.toml', 'third_party/rustyAC-src/rustyAC-master/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-ios-rust-
+
+      - name: Build the real ARM64 Rust static library (jobs limited to 2)
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo build --release --target aarch64-apple-ios -p ac-ios-runtime
+        working-directory: rust
+
+      - name: Project preflight + archive inspection (rebuilt library)
+        run: |
+          python3 scripts/verify_ios_project.py
+          python3 scripts/audit_ios_link_inputs.py
+          python3 scripts/inspect_ios_archive.py \
+            rust/target/aarch64-apple-ios/release/libac_ios_runtime.a
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/project.yml --project ios
+
+      # This starts only after the Rust step above has fully finished.
+      - name: Build UNSIGNED .app with the iPhoneOS SDK (full log captured)
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/ac-ios-port.xcodeproj \
+            -scheme ac-ios-port -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build/ios/DerivedData" \
+            -jobs 2 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build 2>&1 | tee build/ios/xcodebuild.log
+
+      - name: Package Payload into a real (unsigned) IPA
+        run: |
+          APP="$(find build/ios/DerivedData/Build/Products/Release-iphoneos \
+                 -maxdepth 1 -name 'ac-ios-port.app' | head -n 1)"
+          test -n "$APP"
+          mkdir -p Payload artifacts
+          cp -R "$APP" Payload/
+          zip -qry artifacts/AC-iOS-Prot-unsigned.ipa Payload
+          python3 scripts/audit_unsigned_ipa.py artifacts/AC-iOS-Prot-unsigned.ipa
+          shasum -a 256 artifacts/AC-iOS-Prot-unsigned.ipa | tee artifacts/unsigned_ipa.sha256
+
+      - name: Upload the unsigned IPA (7-day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AC-iOS-Prot-unsigned
+          path: |
+            artifacts/AC-iOS-Prot-unsigned.ipa
+            artifacts/unsigned_ipa.sha256
+          retention-days: 7
+
+      - name: Upload build and toolchain logs (7-day retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AC-iOS-build-logs
+          path: |
+            build/ios/xcodebuild.log
+            build/ios/toolchain.txt
+          retention-days: 7
