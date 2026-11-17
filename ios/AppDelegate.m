@@ -11,7 +11,9 @@ static NSString *const kACRootBookmarkKey = @"ac.root.bookmark";
 
 + (nullable NSData *)bookmarkForURL:(NSURL *)url {
     NSError *error = nil;
-    NSData *data = [url bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope
+    // iOS has no NSURLBookmarkCreationWithSecurityScope: a security scope is
+    // embedded implicitly in document-picker bookmarks (NSURL.h). Options 0.
+    NSData *data = [url bookmarkDataWithOptions:0
                  includingResourceValuesForKeys:nil
                                   relativeToURL:nil
                                           error:&error];
@@ -25,7 +27,7 @@ static NSString *const kACRootBookmarkKey = @"ac.root.bookmark";
     BOOL stale = NO;
     NSError *error = nil;
     NSURL *url = [NSURL URLByResolvingBookmarkData:data
-                                          options:NSURLBookmarkResolutionWithSecurityScope
+                                          options:0
                                     relativeToURL:nil
                               bookmarkDataIsStale:&stale
                                             error:&error];
@@ -63,8 +65,11 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 }
 
 - (void)chooseACRootFrom:(UIViewController *)presenter {
+    // iOS SDK does not expose UTType.folder as a class property; the public.folder
+    // identifier is the canonical UTI (verified against iPhoneOS17.4 UTType.h).
+    UTType *folderType = [UTType typeWithIdentifier:@"public.folder"];
     UIDocumentPickerViewController *picker =
-        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTType.folder ]
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ folderType ]
                                                                    asCopy:NO];
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;

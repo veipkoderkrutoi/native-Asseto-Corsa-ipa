@@ -92,7 +92,8 @@ for sym in symbols:
 
 # 7. Runtime wiring in Objective-C.
 check("document picker used", "UIDocumentPickerViewController" in delegate)
-check("security-scoped bookmark used", "NSURLBookmarkCreationWithSecurityScope" in delegate)
+check("iOS bookmark + security scope used",
+      "bookmarkDataWithOptions:0" in delegate and "startAccessingSecurityScopedResource" in delegate)
 check("touch cancellation handled", "touchesCancelled" in app)
 check("GameController connected/disconnected observed",
       "GCControllerDidConnectNotification" in app and "GCControllerDidDisconnectNotification" in app)
