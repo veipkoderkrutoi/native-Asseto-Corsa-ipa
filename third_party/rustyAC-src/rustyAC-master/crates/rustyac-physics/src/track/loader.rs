@@ -1,0 +1,362 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from Assetto Corsa (acs.exe, Kunos Simulazioni).
+
+//! Loading a track: the part of AC's `TrackAvatar` that the physics needs.
+//!
+//! `TrackAvatar::TrackAvatar` @ 0x1401c5250 loads the kn5 models listed in `models.ini`
+//! (`init3D` @ 0x1401c8740), walks their nodes and turns every mesh whose name starts with a
+//! number into a collision mesh with a surface (`initPhysics` @ 0x1401ca440,
+//! `processPhysicsNode` @ 0x1401cc5e0, `addPhysicsMesh` @ 0x1401c78e0), loads the AI line,
+//! puts the spawn points on the ground (`initRespawnPositionSet` @ 0x1401cb8c0) and builds the
+//! timing lines from pairs of gate nodes (`initTimeLines` @ 0x1401cbc90).
+//!
+//! The physics vertices are the floats of the file: no node matrix and no `POSITION` /
+//! `ROTATION` of `models.ini` is applied to them (the game does not either). Only the helper
+//! nodes (`AC_...`) have world matrices.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use rustyac_content::kn5::{Kn5, NodeClass};
+use rustyac_content::track_files::TrackFiles;
+use rustyac_content::vfs::PathExt;
+
+use super::spline;
+use super::surfaces::{get_sector_id, SurfacesManager};
+use super::timing;
+use super::Track;
+use crate::vecmath::{xm_matrix_multiply, Mat44f};
+
+/// The clock of the load report. A browser's wasm has no clock of its own (`Instant::now`
+/// panics there): the report's seconds are then zero.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+#[derive(Clone, Copy)]
+struct Instant(std::time::Instant);
+
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+impl Instant {
+    fn now() -> Instant {
+        Instant(std::time::Instant::now())
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+}
+
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+#[derive(Clone, Copy)]
+struct Instant;
+
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+impl Instant {
+    fn now() -> Instant {
+        Instant
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+}
+
+/// A helper node of the track's models: a node whose name starts with `AC_`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HelperNode {
+    pub name: String,
+    /// `Node::matrix`: the node's own matrix. This, not the world matrix, is where the game
+    /// takes spawn points and timing gates from (and what it changes when it drops a spawn
+    /// point onto the road).
+    pub local: Mat44f,
+    /// `Node::getWorldMatrix` @ 0x14020e190, as loaded.
+    pub world: Mat44f,
+}
+
+/// What loading found, for the console and the report.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackLoadReport {
+    pub files: Vec<PathBuf>,
+    /// `TrackPhysicsStats`: physical meshes, their triangles, meshes per name number.
+    pub objects: u32,
+    pub tris: u64,
+    pub groups: BTreeMap<i32, i32>,
+    /// Vertices of the physical meshes.
+    pub vertices: u64,
+    /// Nodes of the OPCODE trees.
+    pub tree_nodes: u64,
+    /// Sub-spaces of the static space, in the order they were made.
+    pub spaces: Vec<u32>,
+    /// Meshes per surface `KEY` ("" = the default surface).
+    pub per_key: BTreeMap<String, u32>,
+    /// What the game prints: surfaces not found, ambiguous names, missing files.
+    pub messages: Vec<String>,
+    /// The helper nodes, in the order of the game's node tree.
+    pub helpers: Vec<HelperNode>,
+    /// Models with a `ROTATION` in the models file, and `MODEL_n` files that are not there.
+    pub rotated_models: u32,
+    pub skipped_models: u32,
+    pub seconds_models: f64,
+    pub seconds_trees: f64,
+    pub seconds_total: f64,
+}
+
+/// The game's folder a track folder sits in (`<game>/content/tracks/<track>`); for a track
+/// kept elsewhere, the game's folder itself (`AC_ROOT`, else Steam's usual place), which has
+/// the surfaces every track starts from.
+pub fn game_root(track_folder: &Path) -> Option<PathBuf> {
+    let beside = track_folder.parent().and_then(Path::parent).and_then(Path::parent).filter(|root| root.join("system").vfs_is_dir());
+    if let Some(root) = beside {
+        return Some(root.to_path_buf());
+    }
+    rustyac_content::install::ac_root()
+}
+
+/// The `[MODEL_n]` list of a models file as the game's own ini reader gives it
+/// (`TrackAvatar::init3D` @ 0x1401c8740): n = 0, 1, 2 ... up to the first missing section.
+fn models_of(ini: &Path, folder: &Path) -> Result<Vec<rustyac_content::ModelEntry>, String> {
+    let reader = crate::data::ini::IniReader::load(ini)?;
+    let mut models = Vec::new();
+    for n in 0.. {
+        let section = format!("MODEL_{n}");
+        if !reader.has_section(&section) {
+            break;
+        }
+        models.push(rustyac_content::ModelEntry {
+            file: crate::data::ini::append_path(folder, &reader.get_string(&section, "FILE")),
+            position: reader.get_float3(&section, "POSITION")?,
+            rotation: reader.get_float3(&section, "ROTATION")?,
+        });
+    }
+    Ok(models)
+}
+
+/// What `TrackAvatar::init3D` @ 0x1401c8740 makes of the top node of a model: `ROTATION` of
+/// the models file (degrees: heading, pitch, roll) turns the matrix of the node
+/// (`createFromEuler`, then `R x matrix`), and `POSITION` always replaces its translation.
+/// Nothing else of the model changes: the vertices of the physical meshes are never moved,
+/// and helper nodes below the top node keep their own matrices, so for the physics this only
+/// matters when a helper node is the top node itself. The picture uses it for every model.
+#[allow(clippy::double_comparisons)] // "less or greater" is false for a NaN, "not equal" is not
+pub fn top_node_matrix(node: &Mat44f, position: [f32; 3], rotation: [f32; 3]) -> Mat44f {
+    let mut local = *node;
+    // 0.017453f, as the game has it (not pi / 180 to the last bit)
+    let rot = rotation.map(|degrees| degrees * f32::from_bits(0x3c8e_f998));
+    // three `ucomiss` against 0: a NaN counts as no rotation
+    if rot.iter().any(|r| *r < 0.0 || *r > 0.0) {
+        local = xm_matrix_multiply(&crate::vecmath::create_from_euler(rot, [0.0; 3]), &local);
+    }
+    local.m[3][0] = position[0];
+    local.m[3][1] = position[1];
+    local.m[3][2] = position[2];
+    local
+}
+
+/// The models of a track that exist, in the order the game loads them (the rules of
+/// [`load_track`]), with where `models.ini` puts each.
+pub fn track_models(folder: &Path, config: &str) -> Result<Vec<rustyac_content::ModelEntry>, String> {
+    let mut files = TrackFiles::find_lenient(folder, config)?;
+    let ini = if config.is_empty() { folder.join("models.ini") } else { folder.join(format!("models_{config}.ini")) };
+    if ini.vfs_is_file() {
+        files.models = models_of(&ini, folder)?;
+    }
+    files.models.retain(|model| model.file.vfs_is_file());
+    Ok(files.models)
+}
+
+/// Loads a track from `folder` (`content/tracks/<track>`), layout `config` ("" for none).
+pub fn load_track(folder: &Path, config: &str) -> Result<(Track, TrackLoadReport), String> {
+    let start = Instant::now();
+    // the reader of ini files would look into a `data.acd` next to a `data` folder (a car's
+    // packed data). A track has none in Assetto Corsa; one that has is not opened
+    let base = if config.is_empty() { folder.to_path_buf() } else { folder.join(config) };
+    if let Some(archive) = super::catalog::packed_data(&base) {
+        return Err(format!("the track's data is packed in {}: refused (rustyAC never decrypts track content)", archive.display()));
+    }
+    let mut files = TrackFiles::find_lenient(folder, config)?;
+    // which models, in which order and where: by the game's own ini rules
+    let ini = if config.is_empty() { folder.join("models.ini") } else { folder.join(format!("models_{config}.ini")) };
+    if ini.vfs_is_file() {
+        files.models = models_of(&ini, folder)?;
+    }
+    // KN5IO::load @ 0x1402151a0 on a file that is not there: the game gets an empty node and
+    // goes on, so the model is left out (a track of which every model is missing is refused)
+    let mut skipped = Vec::new();
+    files.models.retain(|model| {
+        let there = model.file.vfs_is_file();
+        if !there {
+            skipped.push(model.file.clone());
+        }
+        there
+    });
+    if files.models.is_empty() {
+        return Err(match skipped.first() {
+            Some(file) => format!("the track model {} is missing (and so is every other model of this track)", file.display()),
+            None => format!("{} lists no model", ini.display()),
+        });
+    }
+    let mut report = TrackLoadReport { files: files.models.iter().map(|m| m.file.clone()).collect(), skipped_models: skipped.len() as u32, ..TrackLoadReport::default() };
+    for file in &skipped {
+        report.messages.push(format!("the track model {} is missing: left out (the game loads an empty node in its place)", file.display()));
+    }
+    let mut track = Track { name: files.name.clone(), config: config.to_string(), data_folder: files.data.parent().unwrap_or(folder).to_path_buf(), ..Track::default() };
+
+    // SurfacesManager::SurfacesManager: the game's own surfaces, then the track's
+    let system = match game_root(folder) {
+        Some(root) => root.join("system").join("data").join("surfaces.ini"),
+        // a track outside a game folder: only its own surfaces (and the built-in wall)
+        None => folder.join("system_surfaces_not_found.ini"),
+    };
+    let manager = SurfacesManager::new(&system, &files.data.join("surfaces.ini"))?;
+    // DRSManager::DRSManager @ 0x140278ea0: [ZONE_0], [ZONE_1] ... of data/drs_zones.ini
+    let zones = crate::data::ini::IniReader::load(&files.data.join("drs_zones.ini"))?;
+    if zones.ready {
+        for n in 0.. {
+            let section = format!("ZONE_{n}");
+            if !zones.has_section(&section) {
+                break;
+            }
+            track.drs_zones.push(super::DrsZone {
+                detection: zones.get_float(&section, "DETECTION")?,
+                start: zones.get_float(&section, "START")?,
+                end: zones.get_float(&section, "END")?,
+            });
+        }
+    }
+    for missing in &manager.missing {
+        report.messages.push(format!("WARNING: Surface definition file {missing} not found"));
+    }
+
+    // TrackAvatar::init3D + initPhysics: every model in the order of models.ini, every node
+    // before its children, children first to last
+    let mut seconds_trees = 0.0;
+    for model in &files.models {
+        if model.rotation != [0.0; 3] {
+            report.rotated_models += 1;
+        }
+        let kn5 = Kn5::open(&model.file).map_err(|e| format!("{}: {e}", model.file.display()))?;
+        let mut reader = kn5.reader().map_err(|e| e.to_string())?;
+        let mut world: Vec<Mat44f> = Vec::with_capacity(kn5.nodes.len());
+        for (index, node) in kn5.nodes.iter().enumerate() {
+            let mut local = Mat44f { m: node.matrix };
+            let parent_world = match node.parent {
+                Some(parent) => world[parent],
+                None => {
+                    // init3D: ROTATION turns the top node, POSITION replaces its translation
+                    local = top_node_matrix(&local, model.position, model.rotation);
+                    Mat44f::IDENTITY
+                }
+            };
+            world.push(xm_matrix_multiply(&local, &parent_world));
+
+            // the file's name is bytes; the game reads surfaces and helpers out of its own
+            // decoded text of it
+            let name = node.name.game_text();
+            if node.class == NodeClass::Mesh {
+                // processPhysicsNode: a Mesh (never a skinned one) whose name starts with a
+                // number other than 0, whatever its flags say
+                let id = get_sector_id(name);
+                let mesh = node.mesh.as_ref().expect("a mesh node has a mesh");
+                if id != 0 {
+                    report.objects += 1;
+                    *report.groups.entry(id).or_insert(0) += 1;
+                    report.tris += mesh.index_count as u64 / 3;
+                    // addPhysicsMesh: a mesh without vertices is left out
+                    if mesh.vertex_count != 0 {
+                        let found = manager.get_surface_desc_from_mesh_name(name);
+                        if let Some(message) = &found.error {
+                            report.messages.push(message.clone());
+                        }
+                        let space = if found.surface.def.collision_category == 2 { (id as u32).wrapping_add(10_000) } else { id as u32 };
+                        let vertices = reader.positions(mesh).map_err(|e| e.to_string())?;
+                        let indices = reader.indices(mesh).map_err(|e| e.to_string())?;
+                        if !rustyac_ode::collision::TriMeshData::indices_in_range(vertices.len(), &indices) {
+                            return Err(format!(
+                                "{}: the physical mesh {:?} has a triangle with a vertex number past its {} vertices (the game would read past the mesh)",
+                                model.file.display(),
+                                node.name,
+                                vertices.len()
+                            ));
+                        }
+                        report.vertices += vertices.len() as u64;
+                        let key = found.key.clone().unwrap_or_default();
+                        *report.per_key.entry(key.clone()).or_insert(0) += 1;
+                        let before = Instant::now();
+                        let made = track.add_surface(name, &key, &found.surface.wav, vertices, indices, &found.surface.def, space);
+                        seconds_trees += before.elapsed().as_secs_f64();
+                        report.tree_nodes += track.world.meshes[made].data.model.nodes.len() as u64;
+                    }
+                }
+            }
+            // TrackAvatar::TrackAvatar: every node whose name starts with AC_POBJECT becomes a
+            // TrackObject (Node::findChildrenByPrefix @ 0x14020e050, in tree order); it gets a
+            // PhysicsObject when its FIRST child is a mesh (TrackObject::TrackObject @
+            // 0x1401cf1a0), made of that mesh's vertices as they are in the file and placed
+            // by the node's own matrix
+            if name.starts_with("AC_POBJECT") {
+                let first = node.children.first().map(|&child| &kn5.nodes[child]);
+                if let Some(mesh) = first.filter(|child| child.class == NodeClass::Mesh).and_then(|child| child.mesh.as_ref()) {
+                    let vertices = reader.positions(mesh).map_err(|e| e.to_string())?;
+                    let indices = reader.indices(mesh).map_err(|e| e.to_string())?;
+                    if !rustyac_ode::collision::TriMeshData::indices_in_range(vertices.len(), &indices) {
+                        return Err(format!(
+                            "{}: the loose object {:?} has a triangle with a vertex number past its {} vertices (the game would read past the mesh)",
+                            model.file.display(),
+                            node.name,
+                            vertices.len()
+                        ));
+                    }
+                    track.objects.push(super::TrackObjectDef { name: name.to_string(), matrix: local, vertices, indices });
+                }
+            }
+            // the game finds helpers by name among all nodes, meshes too, the first in the tree
+            if name.starts_with("AC_") {
+                report.helpers.push(HelperNode { name: name.to_string(), local, world: world[index] });
+            }
+        }
+    }
+    // what the first ray of the game does once: the boxes of the meshes and of their spaces
+    track.world.clean();
+    report.spaces = track.world.spaces.iter().map(|s| s.id).collect();
+    report.seconds_models = start.elapsed().as_secs_f64() - seconds_trees;
+    report.seconds_trees = seconds_trees;
+
+    // TrackAvatar::initPhysics: Track::initAISpline once the meshes are there
+    spline::init_ai_spline(&mut track, &files.ai, &files.data, &mut report.messages)?;
+    // TrackAvatar::TrackAvatar: three spawn sets, then the timing lines. (The set of a
+    // session, `HOTLAP_START` for one, is made when the session is: init_respawn_position_set.)
+    track.helper_nodes = report.helpers.clone();
+    for set in ["PIT", "START", "TIME_ATTACK"] {
+        timing::init_respawn_position_set(&mut track, set);
+    }
+    timing::init_time_lines(&mut track, &mut report.messages);
+    report.seconds_total = start.elapsed().as_secs_f64();
+    Ok((track, report))
+}
+
+impl TrackLoadReport {
+    /// A few lines for the console.
+    pub fn summary(&self, track: &Track) -> String {
+        let keys: Vec<String> = self.per_key.iter().map(|(key, count)| format!("{} {count}", if key.is_empty() { "(no match)" } else { key })).collect();
+        format!(
+            "track {}{}: {} physics meshes, {} triangles, {} vertices in {} sub-spaces ({} tree nodes), {} timing lines, AI line {}, spawn sets {}\n\
+             surfaces: {}\n\
+             loaded in {:.2} s (models {:.2} s, collision trees {:.2} s)",
+            track.name,
+            if track.config.is_empty() { String::new() } else { format!(" / {}", track.config) },
+            self.objects,
+            self.tris,
+            self.vertices,
+            self.spaces.len(),
+            self.tree_nodes,
+            track.time_lines.len(),
+            match &track.ai_spline {
+                Some(spline) => format!("{} points, {:.1} m", spline.point_count(), spline.length()),
+                None => "none".to_string(),
+            },
+            track.spawn_positions.iter().map(|(name, slots)| format!("{name} x{}", slots.len())).collect::<Vec<_>>().join(", "),
+            keys.join(", "),
+            self.seconds_total,
+            self.seconds_models,
+            self.seconds_trees
+        )
+    }
+}

@@ -1,0 +1,30 @@
+# Vendored rustyAC: only crates/ + Cargo manifests + license files are needed
+# to compile our path dependencies. Its docs/ is ~31 MB of unrelated material.
+third_party/rustyAC-src/rustyAC-master/docs/
+third_party/rustyAC-src/rustyAC-master/things/
+third_party/rustyAC-src/rustyAC-master/tools/
+third_party/rustyAC-src/rustyAC-master/web/
+third_party/rustyAC-src/rustyAC-master/packaging/
+third_party/rustyAC-src/rustyAC-master/server/
+third_party/rustyAC-src/rustyAC-master/.github/
+
+# Local build products (rebuilt in CI; keep the repository small)
+rust/target/
+third_party/rustyAC-src/rustyAC-master/target/
+third_party/*.zip
+build/
+checkpoint/
+*.xcarchive
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Large binary artifacts and IPAs are produced by CI, not committed
+artifacts/*.ipa
+artifacts/libac_ios_runtime.a
+
+# OS / editor noise
+.DS_Store
+__pycache__/
+*.pyc
+
+# NOTE: protected Assetto Corsa content is NEVER copied into this repository.

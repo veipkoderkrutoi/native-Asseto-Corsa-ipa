@@ -1,0 +1,528 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! The text HUD of the debug view: speed, gear, revs, pedals, aids, timer, frame rate.
+//! In the browser only [`HudInfo`] is used (the page has no HUD yet: the HUD task).
+#![cfg_attr(any(not(windows), feature = "wgpu"), allow(dead_code, unused_imports))]
+
+#[cfg(all(windows, not(feature = "wgpu")))]
+use super::font::{FontBitmap, SOLID};
+use crate::input::device_name;
+#[cfg(all(windows, not(feature = "wgpu")))]
+use crate::physics_thread::Timing;
+use crate::view::CarView;
+
+/// A corner of a HUD rectangle: pixels from the top left, texture coordinates, colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct HudVertex {
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
+
+/// What the HUD shows besides the car.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HudInfo {
+    /// the fade of a change of the focused car: seconds since it began and its length
+    /// (`ACCameraManager::fadeIn`)
+    pub focus_fade: Option<(f32, f32)>,
+    pub fps: f32,
+    /// The frame-rate counter (Ctrl+F, `--show-fps`): the average and the longest frame time of
+    /// the last half second, in milliseconds.
+    pub fps_counter: bool,
+    pub frame_ms: f32,
+    pub frame_max_ms: f32,
+    #[cfg(all(windows, not(feature = "wgpu")))]
+    pub timing: Timing,
+    pub paused: bool,
+    pub camera: String,
+    /// A recorded drive is playing.
+    pub replay: bool,
+    /// … and has come to its end.
+    pub replay_over: bool,
+    /// The replay's transport: what `Sim::evOnReplayStatusChanged` was fired with since the last
+    /// frame (status, speed, slow-motion level), and the speed everything reads this frame.
+    pub replay_events: Vec<(i32, f32, f32)>,
+    pub replay_scale: f32,
+    /// The two above are filled in (the window's replay; not a screenshot or a benchmark).
+    pub replay_transport: bool,
+    /// The transport's state in words, for the display ("" while it plays).
+    pub replay_state: String,
+    /// Extra lines (top left, under the numbers).
+    pub notes: Vec<String>,
+    /// `--no-hud`: nothing of this display is drawn.
+    pub hidden: bool,
+    /// Task 28: what the referee says (the session, the flags, penalties, results).
+    pub referee: Option<crate::referee::RefereeHud>,
+    /// Task 30: an online session's ping, welcome message and countdown
+    pub online: Option<crate::online::OnlineGui>,
+}
+
+type Color = [f32; 4];
+const WHITE: Color = [0.95, 0.95, 0.95, 1.0];
+const DIM: Color = [0.62, 0.66, 0.70, 1.0];
+const PANEL: Color = [0.03, 0.04, 0.05, 0.62];
+const GREEN: Color = [0.20, 0.85, 0.30, 1.0];
+const RED: Color = [0.92, 0.18, 0.15, 1.0];
+const BLUE: Color = [0.25, 0.55, 0.95, 1.0];
+const YELLOW: Color = [0.98, 0.82, 0.12, 1.0];
+const OFF: Color = [0.25, 0.27, 0.30, 1.0];
+
+#[cfg(all(windows, not(feature = "wgpu")))]
+pub struct Hud<'a> {
+    font: &'a FontBitmap,
+    pub vertices: Vec<HudVertex>,
+}
+
+#[cfg(all(windows, not(feature = "wgpu")))]
+impl<'a> Hud<'a> {
+    pub fn new(font: &'a FontBitmap) -> Hud<'a> {
+        Hud { font, vertices: Vec::with_capacity(4096) }
+    }
+
+    fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: Color) {
+        let corner = |px: f32, py: f32, u: f32, v: f32| HudVertex { position: [px, py], uv: [u, v], color };
+        let (a, b, c, d) = (corner(x, y, uv[0], uv[1]), corner(x + w, y, uv[2], uv[1]), corner(x + w, y + h, uv[2], uv[3]), corner(x, y + h, uv[0], uv[3]));
+        self.vertices.extend([a, b, c, a, c, d]);
+    }
+
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        let uv = self.font.uv(SOLID);
+        self.quad(x, y, w, h, uv, color);
+    }
+
+    /// The width of a text at a scale.
+    pub fn width(&self, text: &str, scale: f32) -> f32 {
+        text.chars().count() as f32 * self.font.glyph().0 * scale
+    }
+
+    /// Draws a text with its top left corner at (x, y); returns its width.
+    pub fn text(&mut self, x: f32, y: f32, scale: f32, color: Color, text: &str) -> f32 {
+        let (gw, gh) = self.font.glyph();
+        let mut at = x;
+        for c in text.chars() {
+            if c != ' ' {
+                let uv = self.font.uv(c as u32);
+                self.quad(at.round(), y.round(), gw * scale, gh * scale, uv, color);
+            }
+            at += gw * scale;
+        }
+        at - x
+    }
+
+    pub fn text_centred(&mut self, centre: f32, y: f32, scale: f32, color: Color, text: &str) {
+        let width = self.width(text, scale);
+        self.text(centre - width * 0.5, y, scale, color, text);
+    }
+
+    pub fn text_right(&mut self, right: f32, y: f32, scale: f32, color: Color, text: &str) {
+        let width = self.width(text, scale);
+        self.text(right - width, y, scale, color, text);
+    }
+
+    /// A vertical bar filled from the bottom by `value` (0..1), with a label under it.
+    #[allow(clippy::too_many_arguments)]
+    fn bar(&mut self, x: f32, bottom: f32, w: f32, h: f32, value: f32, color: Color, label: &str, s: f32) {
+        self.rect(x, bottom - h, w, h, [0.10, 0.11, 0.12, 0.85]);
+        let filled = h * value.clamp(0.0, 1.0);
+        self.rect(x, bottom - filled, w, filled, color);
+        self.text_centred(x + w * 0.5, bottom + 4.0 * s, 0.6 * s, DIM, label);
+    }
+
+    /// A lamp: a labelled box that is lit or not.
+    #[allow(clippy::too_many_arguments)]
+    fn lamp(&mut self, x: f32, y: f32, w: f32, h: f32, lit: bool, color: Color, label: &str, s: f32) {
+        self.rect(x, y, w, h, if lit { color } else { OFF });
+        let text_color = if lit { [0.02, 0.02, 0.02, 1.0] } else { DIM };
+        let (_, gh) = self.font.glyph();
+        self.text_centred(x + w * 0.5, y + (h - gh * 0.7 * s) * 0.5, 0.7 * s, text_color, label);
+    }
+}
+
+/// `m:ss.mmm`
+pub fn clock(seconds: f64) -> String {
+    let ms = (seconds.max(0.0) * 1000.0).round() as u64;
+    format!("{}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
+}
+
+/// A lap time as `m:ss.mmm`, or dashes for none.
+pub fn lap_clock(ms: u32) -> String {
+    if ms == 0 {
+        "-:--.---".to_string()
+    } else {
+        format!("{}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
+    }
+}
+
+/// The gear as a driver reads it.
+pub fn gear_label(gear: i32) -> String {
+    match gear {
+        0 => "R".to_string(),
+        1 => "N".to_string(),
+        n => (n - 1).to_string(),
+    }
+}
+
+/// The whole HUD for a picture of `width` x `height` pixels.
+/// The lines of a hybrid car: battery, what the motor gives now, the lap's allowance, and
+/// the cockpit's settings as the game's own messages name them. None for a car without a
+/// hybrid system and without an engine-brake control.
+/// The tyres that have burst (`TyreStatus::inflation` 0), for the damage panel; the game shows
+/// them as red tyre icons in its damage display.
+fn burst_tyres(view: &CarView) -> Vec<&'static str> {
+    const WHEEL: [&str; 4] = ["LF", "RF", "LR", "RR"];
+    // (before the car is put down every tyre's inflation is 0)
+    let inflation = &view.render.inflation;
+    if inflation.iter().all(|i| *i <= 0.0) {
+        return Vec::new();
+    }
+    WHEEL.iter().zip(inflation).filter(|(_, i)| **i <= 0.0).map(|(w, _)| *w).collect()
+}
+
+fn hybrid_lines(view: &CarView) -> Vec<String> {
+    let h = &view.hybrid;
+    let mut lines = Vec::new();
+    if h.has_kers || h.has_ers {
+        let mut text = format!("{} {:.0} %  deploy {:.0} %", if h.has_ers { "ERS" } else { "KERS" }, h.charge * 100.0, h.input * 100.0);
+        if h.max_kj > 0.0 && h.max_kj < 1.0e6 {
+            text.push_str(&format!("  lap {:.0} / {:.0} kJ", h.used_kj, h.max_kj));
+        } else {
+            text.push_str(&format!("  lap {:.0} kJ", h.used_kj));
+        }
+        if h.charging {
+            text.push_str("  CHG");
+        }
+        lines.push(text);
+    }
+    if h.has_ers {
+        let mut text = format!("MGU-K {}/{} {}", h.power_index + 1, h.power_count, h.power_name.as_str());
+        text.push_str(&format!("  rec {} %", h.recovery * 10));
+        text.push_str(if h.heat_charging { "  MGU-H battery" } else { "  MGU-H motor" });
+        lines.push(text);
+    }
+    if h.engine_brake_count > 1 {
+        lines.push(format!("engine brake {}/{}", h.engine_brake + 1, h.engine_brake_count));
+    }
+    lines
+}
+
+#[cfg(all(windows, not(feature = "wgpu")))]
+pub fn build(font: &FontBitmap, view: &CarView, info: &HudInfo, width: f32, height: f32) -> Vec<HudVertex> {
+    if info.hidden {
+        return Vec::new();
+    }
+    let mut hud = Hud::new(font);
+    let s = (height / 720.0).max(0.5);
+    let (_, gh) = font.glyph();
+    let line = gh * 0.75 * s + 3.0 * s;
+
+    // Ctrl+F: the frame-rate counter, top right under the tyres (the virtual mirror has the middle)
+    if info.fps_counter {
+        let w = 450.0 * s;
+        let (x, y) = (width - 10.0 * s - w, 120.0 * s);
+        hud.rect(x, y, w, gh * s + 12.0 * s + line, PANEL);
+        hud.text(x + 14.0 * s, y + 6.0 * s, 1.0 * s, if info.fps >= 59.0 { GREEN } else { YELLOW }, &format!("{:.0} FPS", info.fps));
+        hud.text_right(x + w - 14.0 * s, y + 10.0 * s, 0.75 * s, WHITE, &format!("frame {:.2} ms  longest {:.1} ms", info.frame_ms, info.frame_max_ms));
+        hud.text(x + 14.0 * s, y + gh * s + 8.0 * s, 0.75 * s, DIM, &format!("physics {:.1} steps/s  step {:.3} ms  (Ctrl+F, F9)", info.timing.rate_hz(), info.timing.step_avg_us() / 1000.0));
+    }
+
+    // top left: timer, rates, who drives, the hybrid system
+    let hybrid = hybrid_lines(view);
+    let rows = 8 + info.notes.len() + hybrid.len();
+    hud.rect(10.0 * s, 10.0 * s, 430.0 * s, line * rows as f32 + 16.0 * s, PANEL);
+    let x = 20.0 * s;
+    let mut y = 16.0 * s;
+    hud.text(x, y, 1.0 * s, WHITE, &clock(view.drive_seconds));
+    hud.text_right(430.0 * s, y + 4.0 * s, 0.75 * s, DIM, &format!("{:.0} FPS", info.fps));
+    y += gh * s + 6.0 * s;
+    let t = &info.timing;
+    for text in [
+        format!("physics {:.1} Hz  step {:.3} ms", t.rate_hz(), t.step_avg_us() / 1000.0),
+        format!("late max {:.2} ms  over 1 ms: {}", t.late_max_us / 1000.0, t.late_over_1ms),
+        format!("driver: {}", device_name(view.device)),
+        format!("camera: {}  (F1, F6)", info.camera),
+        format!("air {:.0} C  road {:.0} C  grip {:.1} %", view.air, view.road, view.grip * 100.0),
+        if view.wind_kmh > 0.0 {
+            format!("wind {:.1} km/h from {:.0} deg  air {:.3}", view.wind_kmh, view.wind_deg, view.air_density)
+        } else {
+            format!("no wind  air {:.3} kg/m3", view.air_density)
+        },
+        format!("tyres {}  setup {}", view.compound.as_str(), if view.setup.as_str().is_empty() { "default" } else { view.setup.as_str() }),
+    ] {
+        hud.text(x, y, 0.75 * s, DIM, &text);
+        y += line;
+    }
+    for text in &hybrid {
+        hud.text(x, y, 0.75 * s, WHITE, text);
+        y += line;
+    }
+
+    for note in &info.notes {
+        hud.text(x, y, 0.75 * s, YELLOW, note);
+        y += line;
+    }
+
+    // under it: damage (the five zones in km/h of impact, the bend of each corner's
+    // suspension, the engine), shown once there is any or while the body touches something
+    let burst = burst_tyres(view);
+    let hurt = view.damage.iter().any(|d| *d > 0.0) || view.suspension_damage.iter().any(|d| *d > 0.0) || view.engine_life < 1000.0 || !burst.is_empty();
+    if hurt || view.contacts > 0 {
+        let top = 10.0 * s + line * rows as f32 + 16.0 * s + 8.0 * s;
+        hud.rect(10.0 * s, top, 430.0 * s, line * 3.0 + 14.0 * s, PANEL);
+        let mut y = top + 7.0 * s;
+        let level = |d: f32| if d > 60.0 { RED } else if d > 0.0 { YELLOW } else { DIM };
+        let mut tx = x + hud.text(x, y, 0.75 * s, if hurt { WHITE } else { DIM }, "DAMAGE") + 12.0 * s;
+        for (label, d) in ["front", "rear", "left", "right", "most"].iter().zip(view.damage) {
+            tx += hud.text(tx, y, 0.75 * s, level(d), &format!("{label} {d:.0}")) + 10.0 * s;
+        }
+        y += line;
+        let mut tx = x + hud.text(x, y, 0.75 * s, DIM, "suspension") + 12.0 * s;
+        for (label, d) in ["LF", "RF", "LR", "RR"].iter().zip(view.suspension_damage) {
+            tx += hud.text(tx, y, 0.75 * s, if d > 0.5 { RED } else if d > 0.0 { YELLOW } else { DIM }, &format!("{label} {:.0}%", d * 100.0)) + 10.0 * s;
+        }
+        y += line;
+        let life = view.engine_life;
+        let engine = if life <= 0.0 { "engine BLOWN".to_string() } else { format!("engine {:.0}%", life * 0.1) };
+        let mut w = hud.text(x, y, 0.75 * s, if life <= 0.0 { RED } else if life < 1000.0 { YELLOW } else { DIM }, &engine);
+        if !burst.is_empty() {
+            w += 16.0 * s + hud.text(x + w + 16.0 * s, y, 0.75 * s, RED, &format!("tyre burst: {}", burst.join(" ")));
+        }
+        if view.contacts > 0 {
+            hud.text(x + w + 16.0 * s, y, 0.75 * s, YELLOW, &format!("touching: {} contact points", view.contacts));
+        }
+    }
+
+    // bottom left: revs, gear, speed (the middle of the picture is the car's)
+    // (wide enough for the lamps at their longest: two aids that are not fitted)
+    let lamps: f32 = [view.tc_text(), view.abs_text(), "DRS".to_string(), "AUTO".to_string(), "LIGHTS".to_string()].iter().map(|label| hud.width(label, 0.7 * s) + 18.0 * s).sum();
+    let panel_w = (470.0 * s).max(lamps + 26.0 * s);
+    let panel_h = 150.0 * s;
+    let px = 10.0 * s;
+    let py = height - panel_h - 40.0 * s;
+    hud.rect(px, py, panel_w, panel_h, PANEL);
+    // the rev bar: green, yellow in the last 15 %, red in the last 5 %
+    let limit = view.rpm_limit.max(1000.0);
+    let revs = (view.rpm / limit).clamp(0.0, 1.0);
+    let (bx, by, bw, bh) = (px + 16.0 * s, py + 12.0 * s, panel_w - 32.0 * s, 20.0 * s);
+    hud.rect(bx, by, bw, bh, [0.10, 0.11, 0.12, 0.9]);
+    let rev_color = if revs > 0.95 {
+        RED
+    } else if revs > 0.85 {
+        YELLOW
+    } else {
+        GREEN
+    };
+    hud.rect(bx, by, bw * revs, bh, rev_color);
+    hud.text(bx, by + bh + 4.0 * s, 0.7 * s, DIM, &format!("{:.0} rpm", view.rpm));
+    // the brake bias, always: AC's own number (getFrontBias x 100, one decimal)
+    hud.text_centred(px + panel_w * 0.5, by + bh + 4.0 * s, 0.7 * s, WHITE, &view.bias_text());
+    hud.text_right(bx + bw, by + bh + 4.0 * s, 0.7 * s, DIM, &format!("{limit:.0}"));
+    // gear and speed
+    let centre = px + panel_w * 0.5;
+    hud.text_centred(centre - 120.0 * s, py + 52.0 * s, 2.6 * s, WHITE, &gear_label(view.gear));
+    hud.text_right(centre + 130.0 * s, py + 56.0 * s, 2.2 * s, WHITE, &format!("{:.0}", view.speed_kmh.abs()));
+    hud.text(centre + 136.0 * s, py + 86.0 * s, 0.8 * s, DIM, "km/h");
+    // lamps
+    let lamp_y = py + panel_h - 34.0 * s;
+    let mut lx = px + 16.0 * s;
+    // the aids' lamps say their level all the time (`TC 2/3`, `ABS off`, `TC not fitted`) and
+    // are lit while the aid acts
+    for (lit, color, label) in [
+        (view.tc_in_action, YELLOW, view.tc_text()),
+        (view.abs_in_action, YELLOW, view.abs_text()),
+        (view.drs, GREEN, "DRS".to_string()),
+        (view.auto_shifter, BLUE, "AUTO".to_string()),
+        (view.lights, WHITE, "LIGHTS".to_string()),
+    ] {
+        let w = hud.width(&label, 0.7 * s) + 12.0 * s;
+        hud.lamp(lx, lamp_y, w, 24.0 * s, lit, color, &label, s);
+        lx += w + 6.0 * s;
+    }
+
+    // bottom right: pedals and steering
+    let (bar_w, bar_h) = (26.0 * s, 110.0 * s);
+    let bottom = height - 44.0 * s;
+    let right = width - 30.0 * s;
+    hud.rect(right - 4.0 * bar_w - 3.0 * 12.0 * s - 14.0 * s, bottom - bar_h - 44.0 * s, 4.0 * bar_w + 3.0 * 12.0 * s + 28.0 * s, bar_h + 78.0 * s, PANEL);
+    let column = |k: f32| right - (k + 1.0) * bar_w - k * 12.0 * s;
+    hud.bar(column(0.0), bottom, bar_w, bar_h, view.gas, GREEN, "GAS", s);
+    hud.bar(column(1.0), bottom, bar_w, bar_h, view.brake, RED, "BRK", s);
+    // the clutch pedal's travel: 1 = pedal up
+    hud.bar(column(2.0), bottom, bar_w, bar_h, 1.0 - view.clutch, BLUE, "CLT", s);
+    hud.bar(column(3.0), bottom, bar_w, bar_h, view.hand_brake, YELLOW, "HB", s);
+    // steering: a marker on a line, right = right
+    let (sx, sw, sy) = (column(3.0), column(0.0) + bar_w - column(3.0), bottom - bar_h - 28.0 * s);
+    hud.rect(sx, sy + 6.0 * s, sw, 3.0 * s, OFF);
+    hud.rect(sx + sw * 0.5 - 1.0, sy, 2.0, 15.0 * s, DIM);
+    let marker = sx + sw * (0.5 + 0.5 * view.steer.clamp(-1.0, 1.0));
+    hud.rect(marker - 4.0 * s, sy, 8.0 * s, 15.0 * s, WHITE);
+
+    // top right: the tyres' loads, coloured by slip (red = past the peak)
+    let (tw, th) = (74.0 * s, 40.0 * s);
+    let tx = width - 2.0 * tw - 36.0 * s;
+    let ty = 16.0 * s;
+    hud.rect(tx - 10.0 * s, ty - 6.0 * s, 2.0 * tw + 30.0 * s, 2.0 * th + 22.0 * s, PANEL);
+    for wheel in 0..4 {
+        // wheel 0 is the front left, which is on the left of a car seen from behind
+        let (col, row) = ((wheel % 2) as f32, (wheel / 2) as f32);
+        let slip = view.wheel_slip[wheel].clamp(0.0, 2.0);
+        let color = if slip > 1.0 { [0.9, 0.25 + 0.2 * (2.0 - slip), 0.15, 1.0] } else { [0.15 + 0.3 * slip, 0.55, 0.25, 1.0] };
+        let (x, y) = (tx + col * (tw + 10.0 * s), ty + row * (th + 10.0 * s));
+        hud.rect(x, y, tw, th, color);
+        let surface = view.surfaces[wheel].as_str();
+        if surface.is_empty() {
+            hud.text_centred(x + tw * 0.5, y + 8.0 * s, 0.7 * s, [0.02, 0.02, 0.02, 1.0], &format!("{:.0} N", view.wheel_load[wheel]));
+        } else {
+            // on a track: the load, and under it the surface the tyre stands on
+            hud.text_centred(x + tw * 0.5, y + 2.0 * s, 0.62 * s, [0.02, 0.02, 0.02, 1.0], &format!("{:.0} N", view.wheel_load[wheel]));
+            let short: String = surface.chars().take(14).collect();
+            hud.text_centred(x + tw * 0.5, y + 21.0 * s, 0.4 * s, [0.02, 0.02, 0.02, 1.0], &short);
+        }
+    }
+
+    // top centre, on a track: the lap
+    let lap = &view.lap;
+    if lap.on_track {
+        let (pw, ph) = (470.0 * s, 96.0 * s);
+        // beside the top left panel where the picture is too narrow for the middle
+        let px = ((width - pw) * 0.5).max(450.0 * s);
+        let py = 10.0 * s;
+        hud.rect(px, py, pw, ph, PANEL);
+        let lap_color = if lap.valid { WHITE } else { RED };
+        hud.text(px + 14.0 * s, py + 8.0 * s, 1.15 * s, lap_color, &lap_clock(lap.current_ms));
+        let state = if lap.valid { "VALID".to_string() } else { format!("INVALID ({} cut{})", lap.cuts, if lap.cuts == 1 { "" } else { "s" }) };
+        hud.text(px + 190.0 * s, py + 14.0 * s, 0.7 * s, if lap.valid { GREEN } else { RED }, &state);
+        hud.text_right(px + pw - 14.0 * s, py + 14.0 * s, 0.7 * s, DIM, &format!("lap {}   {:.1} %", lap.laps + 1, lap.position.clamp(0.0, 1.0) * 100.0));
+        let row = py + 44.0 * s;
+        hud.text(px + 14.0 * s, row, 0.7 * s, DIM, &format!("last {}{}", lap_clock(lap.last_ms), if lap.last_ms != 0 && !lap.last_valid { " cut" } else { "" }));
+        hud.text(px + 250.0 * s, row, 0.7 * s, DIM, &format!("best {}", lap_clock(lap.best_ms)));
+        // the sectors: done ones with their time, the running one marked
+        let row = py + 68.0 * s;
+        let mut sx = px + 14.0 * s;
+        for k in 0..lap.sector_count.min(4) {
+            let time = lap.sector_ms[k as usize];
+            let (text, color) = if k < lap.sector {
+                (format!("S{} {:.3}", k + 1, time as f64 / 1000.0), WHITE)
+            } else if k == lap.sector {
+                (format!("S{} ...", k + 1), YELLOW)
+            } else {
+                (format!("S{}", k + 1), DIM)
+            };
+            sx += hud.text(sx, row, 0.7 * s, color, &text) + 18.0 * s;
+        }
+        let mut notes = Vec::new();
+        if lap.tyres_out > 0 {
+            notes.push(format!("{} off", lap.tyres_out));
+        }
+        if lap.in_pit_lane {
+            notes.push("PIT LANE".to_string());
+        }
+        hud.text_right(px + pw - 14.0 * s, row, 0.7 * s, if lap.tyres_out > 2 { RED } else { DIM }, &notes.join("  "));
+    }
+
+    // Task 28: the referee, in words (AC's own displays come with the UI): the session's
+    // banner at the top, the flags under it, messages in the middle, the results as a table
+    if let Some(referee) = &info.referee {
+        if referee.fade > 0.0 {
+            hud.rect(0.0, 0.0, width, height, [0.0, 0.0, 0.0, referee.fade]);
+        }
+        let mut y = 150.0 * s;
+        let title = if referee.banner.is_empty() { referee.session.clone() } else { format!("{}   {}", referee.session, referee.banner) };
+        let w = hud.width(&title, 1.0 * s) + 28.0 * s;
+        hud.rect((width - w) * 0.5, y - 4.0 * s, w, gh * s + 8.0 * s, PANEL);
+        hud.text_centred(width * 0.5, y, 1.0 * s, WHITE, &title);
+        y += gh * s + 10.0 * s;
+        for text in &referee.lines {
+            hud.text_centred(width * 0.5, y, 0.75 * s, DIM, text);
+            y += line;
+        }
+        for flag in &referee.flags {
+            let color = if flag.starts_with("BLACK") || flag.starts_with("PENALTY") { RED } else { YELLOW };
+            let w = hud.width(flag, 1.2 * s) + 28.0 * s;
+            hud.rect((width - w) * 0.5, y, w, gh * 1.2 * s + 10.0 * s, PANEL);
+            hud.text_centred(width * 0.5, y + 5.0 * s, 1.2 * s, color, flag);
+            y += gh * 1.2 * s + 14.0 * s;
+        }
+        if !referee.caption.is_empty() {
+            hud.text_centred(width * 0.5, y, 0.75 * s, RED, &referee.caption);
+        }
+        let mut y = height * 0.42;
+        for text in &referee.centre {
+            let w = hud.width(text, 1.2 * s) + 32.0 * s;
+            hud.rect((width - w) * 0.5, y, w, gh * 1.2 * s + 10.0 * s, PANEL);
+            hud.text_centred(width * 0.5, y + 5.0 * s, 1.2 * s, RED, text);
+            y += gh * 1.2 * s + 12.0 * s;
+        }
+        // Task 28b: the pit menu, a block at the right (the game's quick menu sits there too)
+        if !referee.pit.is_empty() {
+            let w = referee.pit.iter().map(|text| hud.width(text, 0.8 * s)).fold(0.0f32, f32::max) + 28.0 * s;
+            let h = (gh * 0.8 * s + 4.0 * s) * referee.pit.len() as f32 + 16.0 * s;
+            let (x, mut y) = (width - w - 24.0 * s, height * 0.25);
+            hud.rect(x, y, w, h, PANEL);
+            y += 8.0 * s;
+            for text in &referee.pit {
+                hud.text(x + 14.0 * s, y, 0.8 * s, if text.starts_with('>') { YELLOW } else { WHITE }, text);
+                y += gh * 0.8 * s + 4.0 * s;
+            }
+        }
+        if !referee.results.is_empty() {
+            let w = referee.results.iter().map(|text| hud.width(text, 0.8 * s)).fold(0.0f32, f32::max) + 40.0 * s;
+            let h = (gh * 0.8 * s + 4.0 * s) * referee.results.len() as f32 + 24.0 * s;
+            let (x, mut y) = ((width - w) * 0.5, (height - h) * 0.5);
+            hud.rect(x, y, w, h, [0.02, 0.02, 0.03, 0.88]);
+            y += 12.0 * s;
+            for (row, text) in referee.results.iter().enumerate() {
+                hud.text(x + 20.0 * s, y, 0.8 * s, if row == 0 { YELLOW } else { WHITE }, text);
+                y += gh * 0.8 * s + 4.0 * s;
+            }
+        }
+    }
+
+    if info.replay {
+        // under the lap panel where there is one
+        let y = if view.lap.on_track { 114.0 * s } else { 14.0 * s };
+        hud.text_centred(width * 0.5, y, 1.0 * s, YELLOW, "REPLAY");
+    }
+    // a change of an aid or of the brake bias: a note for a moment, in the upper middle
+    if let Some(note) = view.aid_note() {
+        let w = hud.width(note, 1.2 * s) + 32.0 * s;
+        let y = height * 0.24;
+        hud.rect((width - w) * 0.5, y, w, gh * 1.2 * s + 14.0 * s, PANEL);
+        hud.text_centred(width * 0.5, y + 7.0 * s, 1.2 * s, YELLOW, note);
+    }
+    if info.replay && !info.replay_state.is_empty() {
+        let w = hud.width(&info.replay_state, 1.6 * s) + 40.0 * s;
+        hud.rect((width - w) * 0.5, height * 0.30, w, gh * 1.6 * s + 16.0 * s, PANEL);
+        hud.text_centred(width * 0.5, height * 0.30 + 8.0 * s, 1.6 * s, YELLOW, &info.replay_state);
+    }
+    if info.paused {
+        let w = hud.width("PAUSED", 2.5 * s) + 40.0 * s;
+        hud.rect((width - w) * 0.5, height * 0.36, w, gh * 2.5 * s + 20.0 * s, PANEL);
+        hud.text_centred(width * 0.5, height * 0.36 + 10.0 * s, 2.5 * s, WHITE, "PAUSED");
+    }
+    let keys = if info.replay {
+        "REPLAY  Ctrl+Space or P play / pause  Ctrl+S slow  Ctrl+F faster  Ctrl+D back  . frame  Home stop  F10 save  F1 view  F6 cameras  Esc quit"
+    } else if lap.on_track {
+        "F1 view  F6 car cameras  R to the start  Shift+R back on track  N new car  T / Y TC / ABS (Shift: down)  ] [ bias  P pause  Esc quit"
+    } else {
+        "F1 view  F6 car cameras  R reset  N new car  T / Y TC / ABS (Shift: down)  ] [ bias  P pause  Esc quit"
+    };
+    // (smaller where the picture is too narrow for the line)
+    let room = width - 28.0 * s;
+    let wide = hud.width(keys, 0.7 * s);
+    let scale = if wide > room { 0.7 * s * room / wide } else { 0.7 * s };
+    hud.text(14.0 * s, height - 28.0 * s, scale, DIM, keys);
+    hud.vertices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels() {
+        assert_eq!(clock(0.0), "0:00.000");
+        assert_eq!(clock(83.4567), "1:23.457");
+        assert_eq!((gear_label(0), gear_label(1), gear_label(2), gear_label(8)), ("R".to_string(), "N".to_string(), "1".to_string(), "7".to_string()));
+    }
+}

@@ -1,0 +1,6 @@
+# Portable Cargo settings: target/ resolves relative to this workspace on
+# every host (Windows research box and the macOS GitHub runner alike).
+# CARGO_BUILD_JOBS=2 is also set explicitly by the CI workflow.
+[build]
+jobs = 2
+target-dir = "target"

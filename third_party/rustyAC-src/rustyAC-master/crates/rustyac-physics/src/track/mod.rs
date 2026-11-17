@@ -1,0 +1,451 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from Assetto Corsa (acs.exe, Kunos Simulazioni).
+
+//! The track: what the car's wheels stand on and what times its laps.
+//!
+//! * [`surfaces`]: AC's `SurfacesManager` (surface types, name matching).
+//! * [`Track`]: AC's physics `Track` (0x148 bytes): the collision meshes with their surfaces
+//!   in ODE's static space, the ground ray, the timing lines, the AI line, the grip level.
+//! * [`loader`]: the part of AC's `TrackAvatar` that builds a `Track` from a track folder:
+//!   which meshes of the kn5 models are physical, the spawn points, the timing gates.
+//! * [`spline`]: the AI line (`fast_lane.ai`) and a car's position along it.
+//! * [`timing`]: timing lines, the lap timer of a car, the lap's validity.
+//!
+//! A [`Track`] never changes once it is loaded, so the game shares one between its physics
+//! thread and its display (`Arc<Track>`); what does change during a session (the grip level,
+//! each car's timer) lives in [`DynamicTrack`] and in the car.
+
+pub mod ai_line;
+pub mod catalog;
+pub mod loader;
+pub mod spline;
+pub mod surfaces;
+pub mod timing;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rustyac_ode::collision::{RayContact, StaticWorld};
+
+use crate::tyre::{RayCastResult, RayTrackCollisionProvider, SurfaceDef};
+use crate::vecmath::Vec3f;
+
+pub use loader::{load_track, HelperNode, TrackLoadReport};
+pub use crate::track::catalog::TrackEntry;
+pub use spline::{AiSpline, SplineLocator, SplineLocatorData};
+pub use surfaces::{SurfaceType, SurfacesManager};
+pub use timing::{init_respawn_position_set, LapDb, LapInvalidator, TimeLine, TimeTransponder};
+
+/// The collide bits every track mesh gets (`Track::addSurface` @ 0x140277e50).
+pub const TRACK_MESH_COLLIDE_BITS: u32 = 0x14;
+
+/// One collision mesh of the track with the copy of its surface (`CollisionMeshODE` and the
+/// `SurfaceDef` behind its user pointer).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackSurface {
+    /// The mesh's name in the kn5 (the game does not keep it; the display does).
+    pub name: String,
+    /// The surface type's `KEY`, or empty for the default surface.
+    pub key: String,
+    /// `wavString`
+    pub wav: String,
+    pub surface_def: SurfaceDef,
+}
+
+/// A ray's answer with what the game's `RayCastHit` adds to the tyre's view of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackRayHit {
+    pub contact: RayContact,
+    pub surface_def: SurfaceDef,
+}
+
+/// AC's physics `Track`.
+#[derive(Clone, Debug, Default)]
+pub struct Track {
+    /// `name`, `config`: the track's folder name and its layout ("" for none).
+    pub name: String,
+    pub config: String,
+    /// `dataFolder`: `content/tracks/<name>[/<config>]`
+    pub data_folder: PathBuf,
+    /// `PhysicsCore::spaceStatic` with the track's meshes.
+    pub world: StaticWorld,
+    /// `surfaces`: one per mesh of [`Track::world`], in the same order.
+    pub surfaces: Vec<TrackSurface>,
+    /// `timeLines`: 0 is start / finish, the others end a sector each.
+    pub time_lines: Vec<TimeLine>,
+    /// `sectorsNormalizedPositions`: where each timing line is along the AI line.
+    pub sectors_normalized_positions: Vec<f32>,
+    /// `isOpen`: a point-to-point track (A to B lines).
+    pub is_open: bool,
+    /// `aiSplineRecorder->bestLapSpline`: the AI line, where the track has one.
+    pub ai_spline: Option<AiSpline>,
+    /// `aiSplineRecorder->pitLaneSpline`
+    pub pit_lane_spline: Option<AiSpline>,
+    /// `aiSplineRecorder` as the AI drivers need it: both lines finished as the game finishes
+    /// them at load, and the track's hints. Worked out when it is first asked for
+    /// ([`Track::ai`]), or with the track when its line is older than version 7.
+    pub ai_recorder: std::sync::OnceLock<Result<ai_line::AiSplineRecorder, String>>,
+    /// The lines a recording made during the session, which replace both of the above
+    /// ([`Track::ai`], [`Track::ai_line`]).
+    pub live_ai: ai_line::LiveAi,
+    /// The layout's `ai` folder
+    pub ai_folder: PathBuf,
+    /// `startingBounds` (`data/starting_bounds.ini`): ranges of AI-line point indices
+    pub starting_bounds: Vec<(u32, u32)>,
+    /// The helper nodes of the track's models (every node whose name starts with `AC_`), in
+    /// the order of the game's node tree: spawn points, timing gates, pit crew places.
+    pub helper_nodes: Vec<HelperNode>,
+    /// `TrackAvatar::spawnPositions`: set name (`PIT`, `START`, `HOTLAP_START` ...) -> the
+    /// slots, as indices into [`Track::helper_nodes`] (nodes that were put on the ground).
+    pub spawn_positions: BTreeMap<String, Vec<usize>>,
+    /// `drsMamanger.zones` (`data/drs_zones.ini`): where along the lap a car may open its
+    /// DRS. Empty: anywhere.
+    pub drs_zones: Vec<DrsZone>,
+    /// `DRSManager::setZones` from the server (`ACClient::onDRSZoneReceived`, 0x53): they
+    /// take the file's place for the rest of the session.
+    pub server_drs_zones: ServerDrsZones,
+    /// The loose objects (`TrackAvatar::trackObjects` that have a `PhysicsObject`), in the
+    /// order the game creates their bodies: the models in the order of the models file, the
+    /// nodes of each in tree order.
+    pub objects: Vec<TrackObjectDef>,
+}
+
+/// A loose object of the track (a cone, a marker board): what AC's `TrackObject::TrackObject`
+/// @ 0x1401cf1a0 hands to `PhysicsObject::PhysicsObject` @ 0x1402ac8a0 in a
+/// `PhysicsObjectDesc`. A node whose name starts with `AC_POBJECT` and whose first child is a
+/// mesh; the body it becomes lives in a car's [`crate::car::body::PhysicsCore`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackObjectDef {
+    /// The node's name.
+    pub name: String,
+    /// `worldMatrix`: the node's OWN matrix (not its world matrix), scale and all.
+    pub matrix: crate::vecmath::Mat44f,
+    /// The first child mesh as it is in the file: positions in the mesh's own frame.
+    pub vertices: Vec<[f32; 3]>,
+    pub indices: Vec<u16>,
+}
+
+/// AC's `DRSZone` (0xc bytes): places along the lap, 0..1.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DrsZone {
+    /// `detection` (read from the file, not used by the physics)
+    pub detection: f32,
+    pub start: f32,
+    pub end: f32,
+}
+
+/// The zones a server sent (a track is shared by every car: the zones change behind an
+/// `Arc`). Cloning a track copies them.
+#[derive(Debug, Default)]
+pub struct ServerDrsZones(std::sync::RwLock<Option<Vec<DrsZone>>>);
+
+impl Clone for ServerDrsZones {
+    fn clone(&self) -> Self {
+        ServerDrsZones(std::sync::RwLock::new(self.get()))
+    }
+}
+
+impl ServerDrsZones {
+    pub fn get(&self) -> Option<Vec<DrsZone>> {
+        self.0.read().map_or(None, |z| z.clone())
+    }
+
+    /// `DRSManager::setZones` @ 0x140279500 (None: the file's zones again)
+    pub fn set(&self, zones: Option<Vec<DrsZone>>) {
+        if let Ok(mut z) = self.0.write() {
+            *z = zones;
+        }
+    }
+}
+
+impl Track {
+    /// `DRSManager::isDRSAvailable` @ 0x140279490 for a car at `npos` along the lap
+    /// (`Car::splineLocatorData.npos`): true on a track without zones, else inside any zone.
+    /// A zone whose end is not above its start goes over the start line.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn is_drs_available(&self, npos: f32) -> bool {
+        let server = self.server_drs_zones.0.read();
+        let zones = match server.as_deref() {
+            Ok(Some(zones)) => zones,
+            _ => &self.drs_zones,
+        };
+        if zones.is_empty() {
+            return true;
+        }
+        for zone in zones {
+            if zone.end > zone.start {
+                if npos >= zone.start && !(npos > zone.end) {
+                    return true;
+                }
+            } else if !(npos >= 0.5) {
+                if !(npos > zone.end) {
+                    return true;
+                }
+            } else if npos >= zone.start {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `Track::addSurface` @ 0x140277e50: a collision mesh with its own copy of the surface,
+    /// in the sub-space `sub_space_id`. Returns the mesh's index.
+    #[allow(clippy::too_many_arguments)] // the game's `Track::addSurface` takes them all
+    pub fn add_surface(&mut self, name: &str, key: &str, wav: &str, vertices: Vec<[f32; 3]>, indices: Vec<u16>, surface_def: &SurfaceDef, sub_space_id: u32) -> usize {
+        let index = self.world.create_tri_mesh(vertices, indices, surface_def.collision_category, TRACK_MESH_COLLIDE_BITS, sub_space_id);
+        let mut surface_def = *surface_def;
+        // the port's stand-in for the game's mesh pointer
+        surface_def.user_pointer = index as u32;
+        self.surfaces.push(TrackSurface { name: name.to_string(), key: key.to_string(), wav: wav.to_string(), surface_def });
+        index
+    }
+
+    /// `PhysicsCore::rayCast` @ 0x1402cd070 with the surface of the mesh that was hit
+    /// (`Track::rayCast` @ 0x140278bb0 for the shared ray, `RayCaster::rayCast` @
+    /// 0x1402cee90 for a tyre's own).
+    pub fn ray_cast_hit(&self, org: &Vec3f, dir: &Vec3f, length: f32) -> Option<TrackRayHit> {
+        let contact = self.world.ray_cast(&[org.x, org.y, org.z], &[dir.x, dir.y, dir.z], length)?;
+        Some(TrackRayHit { contact, surface_def: self.surfaces[contact.mesh].surface_def })
+    }
+
+    /// `AISplineRecorder::load` @ 0x1402952c0 and `loadHints` for the AI drivers: both lines
+    /// finished as the game finishes them when it loads a track (every point's radius,
+    /// grade and corner distances worked out again, normals, camber and grip from the track
+    /// under the line, the straights, the pit lane's line and where it meets the fast lane)
+    /// and `data/ai_hints.ini`. It takes a moment, so it is done when a driver first asks;
+    /// nothing else reads it. `None`: the lines could not be finished ([`Track::init_ai`]
+    /// says why).
+    pub fn ai(&self) -> Option<&ai_line::AiSplineRecorder> {
+        if let Some(live) = self.live_ai.latest() {
+            return Some(live);
+        }
+        self.ai_recorder.get_or_init(|| ai_line::AiSplineRecorder::load(self, &self.ai_folder, &self.data_folder.join("data"))).as_ref().ok()
+    }
+
+    /// `aiSplineRecorder->getBestLapSpline()` while the cars run: the last lap a recording
+    /// finished, else the track's line.
+    pub fn ai_line(&self) -> Option<&AiSpline> {
+        match self.live_ai.latest() {
+            Some(live) => Some(&live.best_lap),
+            None => self.ai_spline.as_ref(),
+        }
+    }
+
+    /// Another `ai` folder for this track (its `fast_lane.ai` and `pit_lane.ai`): everything
+    /// that was made from the lines is made again. Returns what the loader said.
+    pub fn replace_ai_line(&mut self, ai_folder: &Path) -> Result<Vec<String>, String> {
+        self.ai_spline = None;
+        self.pit_lane_spline = None;
+        self.ai_recorder = std::sync::OnceLock::new();
+        self.live_ai = ai_line::LiveAi::default();
+        let mut messages = Vec::new();
+        let data = self.data_folder.join("data");
+        spline::init_ai_spline(self, ai_folder, &data, &mut messages)?;
+        // the game adds the timing lines after the AI line, so the sectors are measured on this one
+        self.time_lines.clear();
+        self.sectors_normalized_positions.clear();
+        timing::init_time_lines(self, &mut messages);
+        Ok(messages)
+    }
+
+    /// [`Track::ai`] now, with the reason when it fails.
+    pub fn init_ai(&self) -> Result<(), String> {
+        self.ai();
+        match self.ai_recorder.get() {
+            Some(Err(message)) => Err(message.clone()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The name of the surface type a `SurfaceDef` of this track came from, for the display.
+    pub fn surface_key(&self, surface_def: &SurfaceDef) -> &str {
+        match self.surfaces.get(surface_def.user_pointer as usize) {
+            Some(surface) if surface.key.is_empty() => "?",
+            Some(surface) => &surface.key,
+            None => "",
+        }
+    }
+
+    /// The lap's length: the AI line's, 0 without one.
+    pub fn length(&self) -> f32 {
+        self.ai_line().map(|s| s.length()).unwrap_or(0.0)
+    }
+}
+
+impl RayTrackCollisionProvider for Track {
+    fn ray_cast(&self, org: &Vec3f, dir: &Vec3f, length: f32) -> Option<RayCastResult> {
+        let hit = self.ray_cast_hit(org, dir, length)?;
+        let (p, n) = (hit.contact.pos, hit.contact.normal);
+        Some(RayCastResult { surface_def: hit.surface_def, pos: Vec3f::new(p[0], p[1], p[2]), normal: Vec3f::new(n[0], n[1], n[2]) })
+    }
+
+    /// `Track::createRayCaster` @ 0x1402781f0: a real track gives every tyre its own ray.
+    fn has_ray_caster(&self) -> bool {
+        true
+    }
+}
+
+/// The road a car stands on when it is a [`Track`] shared with others.
+#[derive(Clone, Debug)]
+pub struct TrackGround(pub Arc<Track>);
+
+impl RayTrackCollisionProvider for TrackGround {
+    fn ray_cast(&self, org: &Vec3f, dir: &Vec3f, length: f32) -> Option<RayCastResult> {
+        self.0.ray_cast(org, dir, length)
+    }
+
+    fn has_ray_caster(&self) -> bool {
+        true
+    }
+}
+
+/// `DynamicTrackData` and `Track::dynamicGripLevel`: the one grip number of the whole track.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicTrack {
+    /// `isExternal`: a server owns the level.
+    pub is_external: bool,
+    /// `enabled`: `cfg/race.ini` has a `[DYNAMIC_TRACK]` section.
+    pub enabled: bool,
+    /// `sessionStartGrip` (`SESSION_START` / 100, at least 0.85)
+    pub session_start_grip: f32,
+    /// `baseGrip`: the session's level before any lap
+    pub base_grip: f32,
+    /// `randomGrip` (`RANDOMNESS` / 100)
+    pub random_grip: f32,
+    /// `gripPerLap` (0.01 / `LAP_GAIN`)
+    pub grip_per_lap: f32,
+    /// `sessionTransfer` (`SESSION_TRANSFER` / 100)
+    pub session_transfer: f32,
+    /// `Track::dynamicGripLevel`: what the tyres multiply their grip by.
+    pub dynamic_grip_level: f32,
+}
+
+impl Default for DynamicTrack {
+    /// `Track::Track` @ 0x140277100 without a `[DYNAMIC_TRACK]` section: off, full grip.
+    fn default() -> DynamicTrack {
+        DynamicTrack {
+            is_external: false,
+            enabled: false,
+            session_start_grip: 1.0,
+            base_grip: 1.0,
+            random_grip: 0.01,
+            grip_per_lap: 0.1,
+            session_transfer: 0.0,
+            dynamic_grip_level: 1.0,
+        }
+    }
+}
+
+/// `(float)rand() * 3.0518509e-05 * 2 - 1`: the game's random number in -1..1.
+#[allow(clippy::excessive_precision)] // the constant's digits as the game's code is read
+fn random_unit(rand: i32) -> f32 {
+    rand as f32 * 3.051_850_9e-5 * 2.0 - 1.0
+}
+
+impl DynamicTrack {
+    /// `Track::initDynamicTrack` @ 0x140278300 for a `[DYNAMIC_TRACK]` section with these
+    /// values (as written in the file); `rand` is the C runtime's `rand()` at that moment.
+    pub fn from_race_ini(session_start: f32, randomness: f32, lap_gain: f32, session_transfer: f32, rand: i32) -> DynamicTrack {
+        let mut track = DynamicTrack { enabled: true, ..DynamicTrack::default() };
+        track.grip_per_lap = if lap_gain > 0.0 { 0.01 / lap_gain } else { 0.0 };
+        track.session_start_grip = session_start * 0.01;
+        if track.session_start_grip < 0.85 {
+            track.session_start_grip = 0.85;
+        }
+        track.random_grip = randomness * 0.01;
+        track.session_transfer = session_transfer * 0.01;
+        track.base_grip = random_unit(rand) * track.random_grip + track.session_start_grip;
+        track
+    }
+
+    /// The handler `Track` hangs on a new session (lambda @ 0x140277740).
+    pub fn on_new_session(&mut self, session_index: i32, rand: i32) {
+        if !self.enabled || self.is_external {
+            return;
+        }
+        if session_index == 0 {
+            self.base_grip = random_unit(rand) * self.random_grip + self.session_start_grip;
+        } else {
+            let carried = (self.dynamic_grip_level - self.session_start_grip) * self.session_transfer + self.session_start_grip;
+            self.base_grip = random_unit(rand) * self.random_grip + carried;
+        }
+    }
+
+    /// `Track::step` @ 0x140278d20, the grip part: `laps` is the sum of every car's lap count.
+    pub fn step(&mut self, laps: i32) {
+        if self.enabled {
+            let v = laps as f32 * self.grip_per_lap + self.base_grip;
+            // the game's comparison: a NaN becomes 0.85
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            let low = !(v >= 0.85);
+            self.dynamic_grip_level = if v > 1.0 {
+                1.0
+            } else if low {
+                0.85
+            } else {
+                v
+            };
+        } else if !self.is_external {
+            self.dynamic_grip_level = 1.0;
+        }
+    }
+
+    /// `Track::setGripLevelExternal` @ 0x140278d00
+    pub fn set_grip_level_external(&mut self, grip: f32) {
+        self.dynamic_grip_level = grip;
+        self.is_external = true;
+        self.enabled = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_grip_level_is_kept_between_85_and_100_percent() {
+        let mut track = DynamicTrack::from_race_ini(96.0, 0.0, 10.0, 50.0, 0);
+        let start = 96.0f32 * 0.01;
+        assert_eq!((track.session_start_grip, track.grip_per_lap, track.base_grip), (start, 0.01f32 / 10.0, -0.0f32 + start));
+        track.step(0);
+        assert_eq!(track.dynamic_grip_level, track.base_grip);
+        track.step(10);
+        assert_eq!(track.dynamic_grip_level, 10.0f32 * track.grip_per_lap + track.base_grip);
+        track.step(1000);
+        assert_eq!(track.dynamic_grip_level, 1.0);
+        track.base_grip = 0.2;
+        track.step(0);
+        assert_eq!(track.dynamic_grip_level, 0.85);
+        track.base_grip = f32::NAN;
+        track.step(0);
+        assert_eq!(track.dynamic_grip_level, 0.85);
+        // a low start is raised, a missing gain means no gain
+        let low = DynamicTrack::from_race_ini(50.0, 0.0, 0.0, 0.0, 0);
+        assert_eq!((low.session_start_grip, low.grip_per_lap), (0.85, 0.0));
+    }
+
+    #[test]
+    fn without_the_section_the_grip_is_full_and_a_server_can_own_it() {
+        let mut track = DynamicTrack { dynamic_grip_level: 0.9, ..Default::default() };
+        track.step(5);
+        assert_eq!(track.dynamic_grip_level, 1.0);
+        track.set_grip_level_external(0.93);
+        track.step(5);
+        assert_eq!(track.dynamic_grip_level, 0.93);
+    }
+
+    #[test]
+    fn a_new_session_carries_part_of_the_gain_over() {
+        let mut track = DynamicTrack::from_race_ini(90.0, 0.0, 1.0, 50.0, 0);
+        track.step(4);
+        let start = track.session_start_grip;
+        assert_eq!(track.dynamic_grip_level, 4.0f32 * track.grip_per_lap + track.base_grip);
+        let level = track.dynamic_grip_level;
+        assert!(level > start);
+        track.on_new_session(1, 0);
+        assert_eq!(track.base_grip, -0.0f32 + ((level - start) * 0.5 + start));
+        track.on_new_session(0, 0);
+        assert_eq!(track.base_grip, -0.0f32 + start);
+    }
+}

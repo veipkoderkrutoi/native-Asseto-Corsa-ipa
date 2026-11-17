@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! rustyAC in the browser, a preview: the Vanilla physics as WebAssembly (bit for bit the
+//! desktop's, see `docs/port/web.md`), a small picture, keyboard and gamepad, AC's sound
+//! (FMOD's HTML5 build from the pack). No AC shaders, no shared memory.
+//!
+//! * [`content`]: which cars and tracks are there, which load, which files a drive needs.
+//! * [`session`]: one drive: the simulation behind a fixed-step accumulator, its camera.
+//! * [`driver`]: the page's keys and pad behind AC's own keyboard and pad classes.
+//! * [`controls`]: the page's Controls panel: the values those classes read from `controls.ini`.
+//! * [`model`], [`bc`]: kn5 models and their textures, ready for a graphics card.
+//! * [`pack`]: the preview pack's manifest (`tools/web_pack` writes it, the page reads it).
+//! * [`race`]: a drive from AC's launcher: the session of its race.ini.
+//! * `gpu`, `web` (wasm only): the wgpu picture and what the page calls.
+//! * `sound` (wasm only): the sound's proof: a recorded drive through the port's sound code
+//!   and the browser's FMOD, its call log for the desktop's to be compared with.
+//! * `net` (wasm only): multiplayer: the page's WebSocket to a gateway as the transport of
+//!   `rustyac-net`'s client, the join as the page steps it.
+//!
+//! Everything but the last two is plain Rust and is tested on the desktop.
+
+pub mod bc;
+pub mod content;
+pub mod controls;
+pub mod driver;
+pub mod model;
+pub mod pack;
+pub mod race;
+pub mod session;
+
+#[cfg(any(windows, all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod full;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod gpu;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod launcher;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod net;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod sound;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod web;

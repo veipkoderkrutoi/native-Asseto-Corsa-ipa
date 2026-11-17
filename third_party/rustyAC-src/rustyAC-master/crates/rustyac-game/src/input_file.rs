@@ -1,0 +1,1440 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! The input file of `--record` / `--replay`: how the car was set up, then what the driver's
+//! device reported in every physics step. Replaying it steps the same car through the same
+//! steps, with no window, no clock and no hardware.
+//!
+//! Layout: a text header (`RUSTYAC-INPUT 1`, `key=value` lines, `end`), then one 40-byte record
+//! per step until the end of the file.
+//!
+//! This file needs nothing but `rustyac-physics`: `tools/chassis_compare` includes it by path
+//! to turn an oracle recording's controls into an input file.
+
+use std::io::Write;
+use std::path::Path;
+
+use rustyac_physics::car::replay::{Ground, RunSetup};
+use rustyac_physics::car::setup::SetupJob;
+use rustyac_physics::race::pitstop::MousePitClick;
+use rustyac_physics::track::DynamicTrack;
+use rustyac_physics::car::{CarControls, ChassisEnvironment};
+
+pub const MAGIC: &str = "RUSTYAC-INPUT 1";
+/// Bytes of one step's record.
+pub const RECORD_SIZE: usize = 40;
+
+/// Commands that run before a step, the way the game's main thread queues work for its
+/// physics thread ([`StepInput::events`]).
+pub mod event {
+    /// Back to the spawn point the game's way: `Car::forceRotation`, `Car::forcePosition`.
+    pub const RESET: u32 = 1 << 0;
+    /// A new car (everything cold and unworn), at the spawn point.
+    pub const REBUILD: u32 = 1 << 1;
+    /// `TractionControl::cycleMode(1)` / `(-1)`.
+    pub const TC_UP: u32 = 1 << 2;
+    pub const TC_DN: u32 = 1 << 3;
+    /// `ABS::cycleMode(1)` / `(-1)`.
+    pub const ABS_UP: u32 = 1 << 4;
+    pub const ABS_DN: u32 = 1 << 5;
+    /// The automatic gearbox aid on / off.
+    pub const AUTO_SHIFTER: u32 = 1 << 6;
+    /// The driver holds the clutch himself in this step: the automatic clutch aid stands
+    /// back (it would overwrite the pedal), and takes over again in the first step without
+    /// this bit.
+    pub const MANUAL_CLUTCH: u32 = 1 << 7;
+    /// Back onto the track: the car is put on the nearest point of the AI line, facing along it.
+    pub const TO_TRACK: u32 = 1 << 8;
+    /// The cockpit's engine-brake setting one up / down (`CarAvatar::cycleEngineBrake`).
+    pub const ENGINE_BRAKE_UP: u32 = 1 << 9;
+    pub const ENGINE_BRAKE_DN: u32 = 1 << 10;
+    /// The MGU-K delivery profile, next / previous (`CarAvatar::cycleERSPower`).
+    pub const MGUK_DELIVERY_UP: u32 = 1 << 11;
+    pub const MGUK_DELIVERY_DN: u32 = 1 << 12;
+    /// The MGU-K recovery level up / down (`CarAvatar::cycleERSRecovery`).
+    pub const MGUK_RECOVERY_UP: u32 = 1 << 13;
+    pub const MGUK_RECOVERY_DN: u32 = 1 << 14;
+    /// The MGU-H between battery and motor (`CarAvatar::cycleERSHeatCharging`).
+    pub const MGUH_MODE: u32 = 1 << 15;
+    /// The track's loose objects back where the track has them: what a new session does
+    /// (`TrackObject::resetOrgMatrix`). Position and rotation only; a cone that is still
+    /// flying flies on from there.
+    pub const OBJECTS_HOME: u32 = 1 << 16;
+    /// Task 27: the driver hands the car to an AI driver (AC's "Activate AI" command): a
+    /// new `AIDriver` for the car as it is, from this step on.
+    pub const AI_ON: u32 = 1 << 17;
+    /// Task 28: the referee's "next session" (`RaceManager::skipCurrentSession`).
+    pub const NEXT_SESSION: u32 = 1 << 18;
+    /// Task 28: the referee's "restart session" (`RaceManager::restartCurrentSession`).
+    pub const RESTART_SESSION: u32 = 1 << 19;
+    /// Task 28b: the pit menu's four keys (`QuickMenuPitstop::sendInput`).
+    pub const PIT_LEFT: u32 = 1 << 20;
+    pub const PIT_UP: u32 = 1 << 21;
+    pub const PIT_RIGHT: u32 = 1 << 22;
+    pub const PIT_DOWN: u32 = 1 << 23;
+    /// Task 28b: the car's AI driver is called in for a pit stop (`AIDriver::requestPitStop`).
+    pub const AI_PIT: u32 = 1 << 24;
+    /// Task 30: the pause menu's "Back to pits" (`CarAvatar::goToSpawnPosition("PIT")`; in a
+    /// race the controls are locked for a while too).
+    pub const BACK_TO_PITS: u32 = 1 << 25;
+    /// Task 30: the ESC menu (the menu of the pits) shows: the player's controls are locked
+    /// (`CarAvatar::setControlsLock(true)`).
+    pub const PITS_LOCK: u32 = 1 << 26;
+    /// Task 30: the ESC menu's "Drive" (`RaceManager::startRace(10000)`, the controls freed).
+    pub const PITS_DRIVE: u32 = 1 << 27;
+
+    pub const NAMES: [(u32, &str); 28] = [
+        (RESET, "reset"),
+        (REBUILD, "rebuild"),
+        (TC_UP, "tc+"),
+        (TC_DN, "tc-"),
+        (ABS_UP, "abs+"),
+        (ABS_DN, "abs-"),
+        (AUTO_SHIFTER, "auto-shifter"),
+        (MANUAL_CLUTCH, "manual clutch"),
+        (TO_TRACK, "to track"),
+        (ENGINE_BRAKE_UP, "engine brake+"),
+        (ENGINE_BRAKE_DN, "engine brake-"),
+        (MGUK_DELIVERY_UP, "mgu-k delivery+"),
+        (MGUK_DELIVERY_DN, "mgu-k delivery-"),
+        (MGUK_RECOVERY_UP, "mgu-k recovery+"),
+        (MGUK_RECOVERY_DN, "mgu-k recovery-"),
+        (MGUH_MODE, "mgu-h mode"),
+        (OBJECTS_HOME, "objects home"),
+        (AI_ON, "ai on"),
+        (NEXT_SESSION, "next session"),
+        (RESTART_SESSION, "restart session"),
+        (PIT_LEFT, "pit menu left"),
+        (PIT_UP, "pit menu up"),
+        (PIT_RIGHT, "pit menu right"),
+        (PIT_DOWN, "pit menu down"),
+        (AI_PIT, "ai pit"),
+        (BACK_TO_PITS, "back to pits"),
+        (PITS_LOCK, "pits: controls locked"),
+        (PITS_DRIVE, "drive"),
+    ];
+}
+
+/// What one physics step is given: nothing but what a driver does.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StepInput {
+    /// `Car::controls` as the device left it in `acquireControls`.
+    pub controls: CarControls,
+    /// The device's headlight switch is held (`getAction(4)`).
+    pub headlights: bool,
+    /// [`event`] bits: commands that ran before this step.
+    pub events: u32,
+    /// Clicks of the cockpit brake-bias control before this step.
+    pub bias_clicks: i32,
+    /// Which device drove (0 scripted, 1 keyboard, 2 Xbox pad, 3 DirectInput). Only a note.
+    pub device: u32,
+}
+
+impl StepInput {
+    pub fn to_bytes(&self) -> [u8; RECORD_SIZE] {
+        let c = &self.controls;
+        let flags = c.gear_up as u32 | (c.gear_dn as u32) << 1 | (c.drs as u32) << 2 | (c.kers as u32) << 3 | (self.headlights as u32) << 4;
+        let words = [
+            c.gas.to_bits(),
+            c.brake.to_bits(),
+            c.steer.to_bits(),
+            c.clutch.to_bits(),
+            c.hand_brake.to_bits(),
+            c.requested_gear_index as u32,
+            flags,
+            self.events,
+            self.bias_clicks as u32,
+            self.device,
+        ];
+        let mut out = [0; RECORD_SIZE];
+        for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> StepInput {
+        let word = |k: usize| u32::from_le_bytes(bytes[k * 4..k * 4 + 4].try_into().unwrap());
+        let flags = word(6);
+        StepInput {
+            controls: CarControls {
+                gas: f32::from_bits(word(0)),
+                brake: f32::from_bits(word(1)),
+                steer: f32::from_bits(word(2)),
+                clutch: f32::from_bits(word(3)),
+                hand_brake: f32::from_bits(word(4)),
+                requested_gear_index: word(5) as i32,
+                gear_up: flags & 1 != 0,
+                gear_dn: flags & 2 != 0,
+                drs: flags & 4 != 0,
+                kers: flags & 8 != 0,
+            },
+            headlights: flags & 16 != 0,
+            events: word(7),
+            bias_clicks: word(8) as i32,
+            device: word(9),
+        }
+    }
+}
+
+/// A car set up the way `tools/chassis_compare` sets one up for a recording of the game:
+/// the session values of that recording, and the instruments the comparison reads.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OracleSetup {
+    pub scenario: String,
+    pub ground: Ground,
+    pub pitlane: bool,
+    pub stability_gain: f32,
+    pub wind_speed: f32,
+    pub wind_direction_deg: f32,
+    pub damage: [f32; 5],
+    /// The recording was made on a real track (`car_oracle run --track`).
+    pub track: Option<OracleTrack>,
+    /// The recording was made with collisions (`car_oracle run --collide`).
+    pub collide: Option<OracleCollide>,
+    /// The recording's session conditions and saved setup (Task 15).
+    pub conditions: rustyac_physics::car::replay::Conditions,
+}
+
+/// How the car of an oracle recording touched things.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OracleCollide {
+    /// The car's own `collider.kn5` (from the game's folder), not the older recordings' stand-in.
+    pub collider_mesh: bool,
+    /// `bounce_vel` of the game's mesh contact joints in that run, as bits (the game never
+    /// writes it: it is whatever its stack held).
+    pub mesh_bounce_vel: u32,
+    /// `PhysicsCore::setNoCollisionSteps` at the start.
+    pub no_collision_steps: i32,
+    /// The oracle's flat test floor as a real mesh.
+    pub floor: bool,
+}
+
+/// The track of an oracle recording and where its car was put.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OracleTrack {
+    /// The track's folder.
+    pub folder: String,
+    /// The track's layout ("" for none).
+    pub layout: String,
+    /// The track's loose objects are in the world (recordings since Task 18).
+    pub objects: bool,
+    /// The spawn: a point on the road and the direction of the car's tail.
+    pub position: [f32; 3],
+    pub tail: [f32; 3],
+    /// The first lap is armed (a hot-lap start).
+    pub armed: bool,
+    /// `PhysicsEngine::allowedTyresOut`
+    pub allowed_tyres_out: i32,
+}
+
+fn hex3(values: &[f32; 3]) -> String {
+    values.map(|v| format!("{:08x}", v.to_bits())).join(",")
+}
+
+fn parse_hex3(text: &str) -> Result<[f32; 3], String> {
+    let words: Vec<f32> = text.split(',').filter_map(|w| u32::from_str_radix(w, 16).ok()).map(f32::from_bits).collect();
+    <[f32; 3]>::try_from(words).map_err(|_| format!("three hexadecimal words expected, got {text:?}"))
+}
+
+/// What the game's session files (`cfg/race.ini`, `cfg/assists.ini`), a saved setup and the
+/// command line add to a live drive (Task 15). The default is the drive of before: no wind, a
+/// fixed grip (`env.dynamic_grip_level`), the car's own aids, the default setup.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    /// The wind handed to `PhysicsEngine::setWind`: m/s (0: none) and degrees.
+    pub wind_speed: f32,
+    pub wind_direction_deg: f32,
+    /// The track's grip of the session (`[DYNAMIC_TRACK]` of race.ini, already drawn); `None`:
+    /// the grip is the fixed number in `env`.
+    pub dynamic_track: Option<DynamicTrack>,
+    /// `[CAR_0] BALLAST` (kg), `RESTRICTOR`; 0: none.
+    pub ballast_kg: f32,
+    pub restrictor: f32,
+    /// `[RACE] PENALTIES`: on a track, two tyres may leave it; off: any number.
+    pub penalties: bool,
+    /// assists.ini `ABS`, `TRACTION_CONTROL` (0 off, 1 as the car has it, 2 on) and
+    /// `STABILITY_CONTROL` (percent); `None`: the car's own files decide.
+    pub assists: Option<(i32, i32, f32)>,
+    /// A saved setup, loaded after the default one.
+    pub setup_file: Option<std::path::PathBuf>,
+    /// `[SESSION_0] TYPE` of race.ini (1 practice ... 4 hot-lap); `None`: a hot-lap session
+    /// when the car starts at the hot-lap start, else practice.
+    pub session_type: Option<i32>,
+    /// race.ini has a hot-lap session (any `[SESSION_n] TYPE=4`): the first lap is armed.
+    /// `None`: armed when the session's type is 4.
+    pub arm_first_lap: Option<bool>,
+}
+
+impl Default for Session {
+    fn default() -> Session {
+        Session { wind_speed: 0.0, wind_direction_deg: 0.0, dynamic_track: None, ballast_kg: 0.0, restrictor: 0.0, penalties: true, assists: None, setup_file: None, session_type: None, arm_first_lap: None }
+    }
+}
+
+/// Numbers of a header line written as bit patterns (`41200000,43020000`).
+fn hex_floats(key: &str, text: &str) -> Result<Vec<f32>, String> {
+    rustyac_physics::car::replay::Conditions::parse_hex(text).map_err(|e| format!("{key}: {e}"))
+}
+
+/// How another car of the session is driven until AI drivers exist (Task 25).
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpponentDrive {
+    /// Stands on its brakes.
+    Parked,
+    /// rustyAC's line follower (`--autodrive`'s driver).
+    Auto,
+    /// The inputs of a recorded drive (`.ryin`), step by step; on the brakes when it ends.
+    Recorded(std::path::PathBuf),
+    /// Task 27: AC's own AI driver, with its `basePush` (the AI level, 0..1) and `aggression`
+    /// (0..0.95) as the game sets them after it made the driver.
+    Ai { push: f32, aggression: f32 },
+}
+
+/// Task 27: what the AI drivers of a session are told and whether one drives the player's car.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AiSetup {
+    /// An AI driver drives the player's car from the start (`controls.ini INPUT_METHOD=AI`).
+    pub player: bool,
+    /// The session's laps and its seconds (`[SESSION_0] LAPS`, `DURATION_MINUTES` x 60): a
+    /// race's laps decide the fuel the drivers start with.
+    pub laps: i32,
+    pub time_secs: f64,
+    /// Milliseconds from the session's start to the green light of a race.
+    pub start_delay_ms: f64,
+    /// What the drivers' random numbers start from (with the car's seed): every draw of
+    /// every AI driver of the session follows from it.
+    pub seed: u32,
+    /// The step before which the player's car is handed to an AI driver (`--ai-at`); -1: never.
+    pub hand_over_step: i64,
+    /// `PhysicsEngine::isTestMode` (`--drag-drive`): `RaceManager::initOffline` gives the
+    /// player's car of a drag session `AIDriverDrag` too
+    pub test_mode: bool,
+}
+
+impl Default for AiSetup {
+    fn default() -> AiSetup {
+        AiSetup { player: false, laps: 5, time_secs: 0.0, start_delay_ms: 0.0, seed: 0, hand_over_step: -1, test_mode: false }
+    }
+}
+
+/// Where race.ini puts a car and what it loads it with (`RaceManager::initOffline`): its pit
+/// box (`AC_PIT_<n>`), its grid slot (`AC_START_<n>`), `BALLAST` (kg) and `RESTRICTOR`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridPlace {
+    pub pit: usize,
+    pub start: i32,
+    pub ballast_kg: f32,
+    pub restrictor: f32,
+}
+
+impl GridPlace {
+    fn to_text(self) -> String {
+        format!("{}:{}:{}:{}", self.pit, self.start, self.ballast_kg, self.restrictor)
+    }
+
+    fn parse(text: &str) -> Result<GridPlace, String> {
+        let wrong = || format!("{text:?}: a car's place is <pit box>:<grid slot>:<ballast>:<restrictor>");
+        let parts: Vec<&str> = text.split(':').collect();
+        if parts.len() != 4 {
+            return Err(wrong());
+        }
+        Ok(GridPlace { pit: parts[0].parse().map_err(|_| wrong())?, start: parts[1].parse().map_err(|_| wrong())?, ballast_kg: parts[2].parse().map_err(|_| wrong())?, restrictor: parts[3].parse().map_err(|_| wrong())? })
+    }
+}
+
+/// Another car of the session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Opponent {
+    /// The car, as [`SimSetup::car`].
+    pub car: String,
+    /// The skin's folder name (empty: the car's first).
+    pub skin: String,
+    pub drive: OpponentDrive,
+    /// A car of race.ini: its place and its load. `None` (`--cars`, `--opponent`): the next
+    /// slot of the session's spawn set, no ballast.
+    pub place: Option<GridPlace>,
+}
+
+impl Opponent {
+    /// `<car>[:<skin>]:<parked | auto | file.ryin>` (the command line's and the header's form).
+    /// The parts are split from the right; the colon after a drive letter (`C:\...`) is not
+    /// a separator, so the car and the file may both be paths.
+    pub fn parse(text: &str) -> Result<Opponent, String> {
+        let wrong = || format!("{text:?}: an opponent is <car>[:<skin>]:<ai | parked | auto | file.ryin>");
+        // the last colon that does not belong to a drive letter
+        fn split_last(text: &str) -> Option<(&str, &str)> {
+            let bytes = text.as_bytes();
+            let mut end = text.len();
+            while let Some(at) = text[..end].rfind(':') {
+                let drive = at >= 1
+                    && bytes[at - 1].is_ascii_alphabetic()
+                    && (at == 1 || bytes[at - 2] == b':')
+                    && matches!(bytes.get(at + 1), Some(b'\\') | Some(b'/'));
+                if !drive {
+                    return Some((&text[..at], &text[at + 1..]));
+                }
+                end = at;
+            }
+            None
+        }
+        let (head, spec) = split_last(text).ok_or_else(wrong)?;
+        let drive = match spec.to_ascii_lowercase().as_str() {
+            "parked" => OpponentDrive::Parked,
+            "auto" => OpponentDrive::Auto,
+            "ai" => OpponentDrive::Ai { push: 1.0, aggression: 0.0 },
+            ai if ai.starts_with("ai=") => {
+                let (push, aggression) = ai[3..].split_once(',').ok_or_else(wrong)?;
+                OpponentDrive::Ai { push: push.parse().map_err(|_| wrong())?, aggression: aggression.parse().map_err(|_| wrong())? }
+            }
+            file if file.ends_with(".ryin") => OpponentDrive::Recorded(std::path::PathBuf::from(spec)),
+            _ => return Err(wrong()),
+        };
+        let (car, skin) = split_last(head).unwrap_or((head, ""));
+        if car.is_empty() {
+            return Err(wrong());
+        }
+        Ok(Opponent { car: car.to_string(), skin: skin.to_string(), drive, place: None })
+    }
+
+    pub fn to_text(&self) -> String {
+        let drive = match &self.drive {
+            OpponentDrive::Parked => "parked".to_string(),
+            OpponentDrive::Auto => "auto".to_string(),
+            OpponentDrive::Recorded(file) => file.display().to_string(),
+            OpponentDrive::Ai { push, aggression } => format!("ai={push},{aggression}"),
+        };
+        if self.skin.is_empty() {
+            format!("{}:{drive}", self.car)
+        } else {
+            format!("{}:{}:{drive}", self.car, self.skin)
+        }
+    }
+}
+
+/// Task 28: the referee of a session: race.ini's session list and rules, and what its own
+/// random numbers and the race's start begin from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefereeHeader {
+    pub sessions: rustyac_physics::race::SessionsIni,
+    /// `system/cfg/assetto_corsa.ini [RACE] OVER_TIME_MULT`
+    pub over_time_mult: f32,
+    /// `RaceManager::startRace`'s delay: for the first session, and for a later race, ms
+    pub first_start_delay_ms: f32,
+    pub next_start_delay_ms: f32,
+    pub seed: u32,
+    /// the base of the wind (km/h, degrees) every new session draws its wind from
+    pub wind_base: Option<(f32, f32)>,
+    /// the drivers' names, the player's first (`[CAR_n] DRIVER_NAME`); a car without one is
+    /// "Driver <n>"
+    pub driver_names: Vec<String>,
+    /// Task 28b: the player's pit stop (`None`: none, as before v0.28.1)
+    pub pit: Option<PitHeader>,
+    /// Task 45: race.ini's special event (its goals)
+    pub game_mode: rustyac_physics::race::game_mode::GameMode,
+}
+
+/// Task 28b: what the player's pit stop is set up with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PitHeader {
+    /// the mandatory pit window: the leader's laps (minutes of a timed race) at which it
+    /// opens and closes; (0, 0): none
+    pub window: (u16, u16),
+    /// `system/cfg/pitstop.ini`
+    pub settings: rustyac_physics::race::QuickMenuSettings,
+    /// the menu's values at the start, when they are not the car's defaults
+    /// (`QuickMenu::values_text`)
+    pub values: Option<String>,
+    /// the text of the setup's `.sp` file (pit stop presets), read into the menu at the
+    /// start (a recording carries it in the key `pit_presets`, as hex)
+    pub presets_ini: Option<String>,
+    /// `Sim::useMousePitstop`: the old mouse menu (a keyboard driver's, or pitstop.ini's
+    /// USE_MOUSE_PITSTOP; key `pit_menu_mouse`)
+    pub mouse: bool,
+}
+
+impl PitHeader {
+    fn to_text(&self) -> String {
+        let s = &self.settings;
+        format!("{}|{}|{}|{}|{}|{:08x}|{}", self.window.0, self.window.1, s.stay_in_car as u32, s.presets_count, s.auto_app_on_pitlane as u32, s.visibility_max_time.to_bits(), self.values.as_deref().unwrap_or("-"))
+    }
+
+    fn parse(value: &str) -> Result<PitHeader, String> {
+        let wrong = || format!("pit_stop: seven values expected, got {value:?}");
+        let parts: Vec<&str> = value.split('|').collect();
+        let [start, end, stay, presets, auto, visibility, values] = parts[..] else { return Err(wrong()) };
+        Ok(PitHeader {
+            window: (start.parse().map_err(|_| wrong())?, end.parse().map_err(|_| wrong())?),
+            settings: rustyac_physics::race::QuickMenuSettings {
+                stay_in_car: stay == "1",
+                presets_count: presets.parse().map_err(|_| wrong())?,
+                auto_app_on_pitlane: auto == "1",
+                visibility_max_time: u32::from_str_radix(visibility, 16).map(f32::from_bits).map_err(|_| wrong())?,
+                // (a recording says where the menu's cursor starts in a key of its own,
+                // `pit_cursor`, since v0.30; the ones before had it on the presets' row)
+                cursor_start: -1,
+            },
+            values: (values != "-").then(|| values.to_string()),
+            presets_ini: None,
+            mouse: false,
+        })
+    }
+}
+
+impl RefereeHeader {
+    fn to_text(&self) -> String {
+        let s = &self.sessions;
+        let wind = self.wind_base.map_or("-".to_string(), |(speed, direction)| format!("{:08x}:{:08x}", speed.to_bits(), direction.to_bits()));
+        format!(
+            "{},{},{},{},{},{:08x},{:08x},{:08x},{},{wind}",
+            s.has_additional_lap as u32,
+            s.fixed_setup as u32,
+            s.penalties_enabled as u32,
+            s.jump_start_penalty_mode.map_or("-".to_string(), |mode| mode.to_string()),
+            s.has_hotlap as u32,
+            self.over_time_mult.to_bits(),
+            self.first_start_delay_ms.to_bits(),
+            self.next_start_delay_ms.to_bits(),
+            self.seed
+        )
+    }
+
+    fn session_text(session: &rustyac_physics::race::Session) -> String {
+        format!("{},{},{:08x},{},{},{}", session.session_type, session.laps, session.duration_minutes.to_bits(), session.forced_position, session.spawn_set, session.name)
+    }
+
+    fn parse(value: &str) -> Result<RefereeHeader, String> {
+        let wrong = || format!("referee: ten values expected, got {value:?}");
+        let parts: Vec<&str> = value.split(',').collect();
+        let [additional, fixed, penalties, jump, hotlap, mult, first, next, seed, wind] = parts[..] else { return Err(wrong()) };
+        let float = |text: &str| u32::from_str_radix(text, 16).map(f32::from_bits).map_err(|_| wrong());
+        let wind_base = match wind.split_once(':') {
+            Some((speed, direction)) => Some((float(speed)?, float(direction)?)),
+            None => None,
+        };
+        Ok(RefereeHeader {
+            sessions: rustyac_physics::race::SessionsIni {
+                sessions: Vec::new(),
+                has_additional_lap: additional == "1",
+                fixed_setup: fixed == "1",
+                penalties_enabled: penalties == "1",
+                jump_start_penalty_mode: jump.parse().ok(),
+                has_hotlap: hotlap == "1",
+            },
+            over_time_mult: float(mult)?,
+            first_start_delay_ms: float(first)?,
+            next_start_delay_ms: float(next)?,
+            seed: seed.parse().map_err(|_| wrong())?,
+            wind_base,
+            driver_names: Vec::new(),
+            pit: None,
+            // shortcut (unreachable, shortcuts.md #6): an input file does not carry the special event's goals, add a key when a proof replays one
+            game_mode: Default::default(),
+        })
+    }
+
+    fn parse_session(value: &str) -> Result<rustyac_physics::race::Session, String> {
+        let wrong = || format!("referee_session: six values expected, got {value:?}");
+        let parts: Vec<&str> = value.splitn(6, ',').collect();
+        let [kind, laps, minutes, forced, spawn, name] = parts[..] else { return Err(wrong()) };
+        let session_type: i32 = kind.parse().map_err(|_| wrong())?;
+        let laps: i32 = laps.parse().map_err(|_| wrong())?;
+        Ok(rustyac_physics::race::Session {
+            session_type,
+            laps,
+            duration_minutes: u32::from_str_radix(minutes, 16).map(f32::from_bits).map_err(|_| wrong())?,
+            is_timed_race: session_type == 3 && laps == 0,
+            forced_position: forced.parse().map_err(|_| wrong())?,
+            spawn_set: spawn.to_string(),
+            name: name.to_string(),
+            ..rustyac_physics::race::Session::default()
+        })
+    }
+}
+
+/// Everything that decides what car is built and how its session starts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimSetup {
+    /// The car: its folder name in the game's `content/cars` (or under `cardata/`), or a path.
+    pub car: String,
+    /// `srand` seed of the C runtime when the car is built.
+    pub seed: u32,
+    /// What the picture's `rand()` starts from once the track is loaded (smoke, flames, clouds,
+    /// the blinking of the displays): the game takes the tick count; a recording carries the
+    /// number so that its replay draws the same. 1 in files recorded before.
+    pub render_seed: u32,
+    /// The physics clock before the first step, ms; step `n` runs at `clock + 3 * (n + 1)`.
+    pub clock_start_ms: f64,
+    /// The session's values. Only the ones written to the header can differ from the default.
+    pub env: ChassisEnvironment,
+    /// The "automatic clutch" driving aid.
+    pub auto_clutch: bool,
+    /// The "automatic gearbox" driving aid.
+    pub auto_shifter: bool,
+    /// The "automatic throttle blip" driving aid (`assists.ini AUTO_BLIP` ->
+    /// `AutoBlip::isActive`); `None`: as the car's loader leaves it (on).
+    pub auto_blip: Option<bool>,
+    /// The session starts when the car is put down (`PhysicsEngine::sessionInfo.startTimeMS` =
+    /// the clock then, as `RaceManager::setCurrentSession` sets it); false: at clock 0, as in
+    /// files recorded before this was known.
+    pub session_starts_at_spawn: bool,
+    /// On a track with `data/drs_zones.ini` the wing opens only in its zones
+    /// (`DRSManager::isDRSAvailable`); false: everywhere, as in files recorded before the zones
+    /// were ported.
+    pub drs_zones: bool,
+    /// `getFFGlobalGain` of the driver's device (a wheel's force-feedback gain; else 1).
+    pub ff_gain: f32,
+    /// Task 31: the session begins in the ESC menu, the player's car held (the controls
+    /// locked) until "Drive", as in the game. Off in files recorded before.
+    pub esc_start: bool,
+    /// Task 44c (`--ai-record`): FormAI's "start recording" before the first step. The AI line
+    /// recorder runs on the first car and every lap it finishes is everyone's AI line.
+    pub ai_record: bool,
+    /// Task 31: the setup editor's jobs of the drive, each with the step it is done before.
+    /// Not in the header: they are the file beside the input file (`<input>.setup`).
+    pub setup_jobs: Vec<(u64, SetupJob)>,
+    /// Task 43: the pit strategy page's edits and the mouse menu's clicks, each with the step
+    /// it is done before (the file `<input>.pit`)
+    pub pit_jobs: Vec<(u64, PitJob)>,
+    /// The oracle's teleports (`Car::forceRotation` then `Car::forcePosition`), each with the step
+    /// it is done before: (step, invalidate the lap, position, tail). Header lines `teleport=`.
+    pub teleports: Vec<(u64, bool, [f32; 3], [f32; 3])>,
+    pub oracle: Option<OracleSetup>,
+    /// The track: a folder, or a name under the game's `content/tracks`. Empty: the endless
+    /// flat road.
+    pub track: String,
+    /// The track's layout (`CONFIG_TRACK`), empty for a track without layouts.
+    pub layout: String,
+    /// The track's loose objects (cones, marker boards) are in the world. False in files
+    /// recorded before they were ported.
+    pub track_objects: bool,
+    /// A new car (`N`) is a new session for the track's grip: part of what the laps added is
+    /// carried over (`[DYNAMIC_TRACK] SESSION_TRANSFER`). False in files recorded before.
+    pub session_transfer: bool,
+    /// Where on the track the car starts: `hotlap`, `pit` or `start`.
+    pub spawn: String,
+    /// The session's wind, track grip, ballast, aids and saved setup.
+    pub session: Session,
+    /// The other cars of the session, in creation order (the driver's car is car 0). Empty:
+    /// one car, stepped exactly as before there were several.
+    pub opponents: Vec<Opponent>,
+    /// Worker threads of the physics engine with several cars (`--physics-threads`); `None`:
+    /// as the game decides it. Never in a file: the result does not depend on it.
+    pub physics_threads: Option<usize>,
+    /// The player's place in a session of race.ini with other cars (the pit box and the grid
+    /// slot of `[CAR_0]`); `None`: the first slot of the spawn set, as before.
+    pub player_place: Option<GridPlace>,
+    /// The skin race.ini gives the player's car in a session with other cars (the file's, or
+    /// the one the game picks when the file's is not a skin of the car). Looks only.
+    pub player_skin: Option<String>,
+    /// Task 27: the AI drivers' session.
+    pub ai: AiSetup,
+    /// Task 28: the referee; `None`: no race rules (and files recorded before there were any).
+    pub referee: Option<RefereeHeader>,
+}
+
+impl Default for SimSetup {
+    /// The F2004 with the oracle's defaults: 26 deg C air, 30 deg C road, grip 1, no wind,
+    /// seed 1, the clock at one minute, the automatic clutch on.
+    fn default() -> SimSetup {
+        SimSetup {
+            car: "ks_ferrari_f2004".to_string(),
+            seed: 1,
+            render_seed: 1,
+            clock_start_ms: 60_000.0,
+            env: ChassisEnvironment::default(),
+            auto_clutch: true,
+            auto_shifter: false,
+            auto_blip: None,
+            session_starts_at_spawn: false,
+            drs_zones: false,
+            ff_gain: 1.0,
+            esc_start: false,
+            ai_record: false,
+            setup_jobs: Vec::new(),
+            pit_jobs: Vec::new(),
+            teleports: Vec::new(),
+            oracle: None,
+            track: String::new(),
+            layout: String::new(),
+            track_objects: false,
+            session_transfer: false,
+            spawn: "hotlap".to_string(),
+            session: Session::default(),
+            opponents: Vec::new(),
+            physics_threads: None,
+            player_place: None,
+            player_skin: None,
+            ai: AiSetup::default(),
+            referee: None,
+        }
+    }
+}
+
+impl SimSetup {
+    /// The physics clock of a step, ms.
+    pub fn time_of_step(&self, step: u64) -> f64 {
+        self.clock_start_ms + (step as f64 + 1.0) * 3.0
+    }
+
+    /// The same car as `tools/chassis_compare` builds it for a recording (oracle set-ups only).
+    pub fn run_setup(&self) -> Option<RunSetup> {
+        let oracle = self.oracle.as_ref()?;
+        Some(RunSetup {
+            scenario: oracle.scenario.clone(),
+            ground: oracle.ground,
+            seed: self.seed,
+            clock_start_ms: self.clock_start_ms,
+            env: self.env,
+            rust_brakes: true,
+            rust_drivetrain: true,
+            rust_aero: true,
+            rust_aids: true,
+            telemetry: true,
+            pitlane: oracle.pitlane,
+            stability_gain: oracle.stability_gain,
+            wind_speed: oracle.wind_speed,
+            wind_direction_deg: oracle.wind_direction_deg,
+            damage: oracle.damage,
+            auto_clutch: self.auto_clutch,
+            auto_shifter: self.auto_shifter,
+            track: None,
+            // (the collider mesh is the game's file: `spawn_car` reads it)
+            collide: match &oracle.collide {
+                Some(c) => rustyac_physics::car::replay::CollideRun {
+                    on: true,
+                    mesh: None,
+                    mesh_bounce_vel: f32::from_bits(c.mesh_bounce_vel),
+                    no_collision_steps: c.no_collision_steps,
+                    floor: c.floor,
+                },
+                None => Default::default(),
+            },
+            conditions: oracle.conditions.clone(),
+        })
+    }
+
+    pub fn header(&self) -> String {
+        let e = &self.env;
+        let mut out = format!("{MAGIC}\n");
+        let mut put = |key: &str, value: String| {
+            out.push_str(key);
+            out.push('=');
+            out.push_str(&value);
+            out.push('\n');
+        };
+        put("car", self.car.clone());
+        put("dt", "0.003".to_string());
+        put("seed", self.seed.to_string());
+        if self.render_seed != 1 {
+            put("render_seed", self.render_seed.to_string());
+        }
+        put("clock_start_ms", format!("{:?}", self.clock_start_ms));
+        put("ambient_temperature", format!("{:?}", e.ambient_temperature));
+        put("road_temperature", format!("{:?}", e.road_temperature));
+        put("dynamic_grip_level", format!("{:?}", e.dynamic_grip_level));
+        put("tyre_consumption_rate", format!("{:?}", e.tyre_consumption_rate));
+        put("mechanical_damage_rate", format!("{:?}", e.mechanical_damage_rate));
+        put("fuel_consumption_rate", format!("{:?}", e.fuel_consumption_rate));
+        put("allow_tyre_blankets", (e.allow_tyre_blankets as u32).to_string());
+        put("penalty_mode", e.penalty_mode.to_string());
+        put("ff_filter", format!("{:?}", e.ff_filter));
+        put("use_fake_understeer_ff", (e.use_fake_understeer_ff as u32).to_string());
+        put("damper_min_value", format!("{:?}", e.damper_min_value));
+        put("damper_gain", format!("{:?}", e.damper_gain));
+        if e.trigger_slip_level != 0.8 {
+            put("trigger_slip_level", format!("{:?}", e.trigger_slip_level));
+        }
+        put("auto_clutch", (self.auto_clutch as u32).to_string());
+        put("auto_shifter", (self.auto_shifter as u32).to_string());
+        if let Some(blip) = self.auto_blip {
+            put("auto_blip", (blip as u32).to_string());
+        }
+        if self.esc_start {
+            put("esc_start", "1".to_string());
+        }
+        if self.session_starts_at_spawn {
+            put("session_starts_at_spawn", "1".to_string());
+        }
+        if self.drs_zones {
+            put("drs_zones", "1".to_string());
+        }
+        if self.ai_record {
+            put("ai_record", "1".to_string());
+        }
+        for (step, invalidate, position, tail) in &self.teleports {
+            put("teleport", format!("{step} {} {} {}", *invalidate as u32, hex3(position), hex3(tail)));
+        }
+        put("ff_gain", format!("{:?}", self.ff_gain));
+        // the session's additions, each only when it is not the default (older files have none)
+        let s = &self.session;
+        let hex = |values: &[f32]| values.iter().map(|x| format!("{:08x}", x.to_bits())).collect::<Vec<_>>().join(",");
+        if s.wind_speed != 0.0 {
+            put("wind", hex(&[s.wind_speed, s.wind_direction_deg]));
+        }
+        if let Some(density) = e.air_density_override {
+            put("air_density_override", hex(&[density]));
+        }
+        if let Some((at_26, per_degree)) = e.experiment_tyre_pressure_law {
+            put("experiment_tyre_pressure_law", hex(&[at_26, per_degree]));
+        }
+        if let Some(t) = &s.dynamic_track {
+            put(
+                "dynamic_track",
+                format!("{},{},{}", t.is_external as u32, t.enabled as u32, hex(&[t.session_start_grip, t.base_grip, t.random_grip, t.grip_per_lap, t.session_transfer, t.dynamic_grip_level])),
+            );
+        }
+        if s.ballast_kg != 0.0 {
+            put("ballast_kg", hex(&[s.ballast_kg]));
+        }
+        if s.restrictor != 0.0 {
+            put("restrictor", hex(&[s.restrictor]));
+        }
+        if !s.penalties {
+            put("penalties", "0".to_string());
+        }
+        if let Some((abs, traction_control, stability)) = s.assists {
+            put("assists", format!("{abs},{traction_control},{}", hex(&[stability])));
+        }
+        if let Some(file) = &s.setup_file {
+            put("setup_file", file.display().to_string());
+        }
+        if let Some(session_type) = s.session_type {
+            put("session_type", session_type.to_string());
+        }
+        if let Some(armed) = s.arm_first_lap {
+            put("arm_first_lap", (armed as u32).to_string());
+        }
+        if let Some(place) = self.player_place {
+            put("player_place", place.to_text());
+        }
+        if let Some(skin) = &self.player_skin {
+            put("player_skin", skin.clone());
+        }
+        if self.ai != AiSetup::default() {
+            // (only a session with AI drivers has the key: older files read as before)
+            put("ai", format!("{},{},{},{},{},{}", self.ai.player as u32, self.ai.laps, self.ai.time_secs, self.ai.start_delay_ms, self.ai.seed, self.ai.hand_over_step));
+        }
+        if self.ai.test_mode {
+            put("ai_test_mode", "1".to_string());
+        }
+        if let Some(referee) = &self.referee {
+            put("referee", referee.to_text());
+            for session in &referee.sessions.sessions {
+                put("referee_session", RefereeHeader::session_text(session));
+            }
+            for name in &referee.driver_names {
+                put("referee_driver", name.clone());
+            }
+            // (only a session with the pit stop has the key: older files read as before)
+            if let Some(pit) = &referee.pit {
+                put("pit_stop", pit.to_text());
+                put("pit_cursor", pit.settings.cursor_start.to_string());
+                if pit.mouse {
+                    put("pit_menu_mouse", "1".to_string());
+                }
+                if let Some(text) = &pit.presets_ini {
+                    put("pit_presets", text.bytes().map(|byte| format!("{byte:02x}")).collect::<String>());
+                }
+            }
+        }
+        for opponent in &self.opponents {
+            put("opponent", opponent.to_text());
+            if let Some(place) = opponent.place {
+                put("opponent_place", place.to_text());
+            }
+        }
+        if !self.track.is_empty() {
+            put("track", self.track.clone());
+            if !self.layout.is_empty() {
+                put("layout", self.layout.clone());
+            }
+            if self.track_objects {
+                put("track_objects", "1".to_string());
+            }
+            if self.session_transfer {
+                put("session_transfer", "1".to_string());
+            }
+            put("spawn", self.spawn.clone());
+        }
+        if let Some(o) = &self.oracle {
+            put("oracle_scenario", o.scenario.clone());
+            put("oracle_ground", o.ground.describe());
+            put("oracle_pitlane", (o.pitlane as u32).to_string());
+            put("oracle_stability_gain", format!("{:?}", o.stability_gain));
+            put("oracle_wind_speed", format!("{:?}", o.wind_speed));
+            put("oracle_wind_direction_deg", format!("{:?}", o.wind_direction_deg));
+            put("oracle_damage", o.damage.map(|d| format!("{d:?}")).join(","));
+            if o.conditions != Default::default() {
+                put("oracle_conditions", o.conditions.encode());
+            }
+            if let Some(track) = &o.track {
+                put("oracle_track_folder", track.folder.clone());
+                if !track.layout.is_empty() {
+                    put("oracle_track_layout", track.layout.clone());
+                }
+                if track.objects {
+                    put("oracle_track_objects", "1".to_string());
+                }
+                put("oracle_spawn_position", hex3(&track.position));
+                put("oracle_spawn_tail", hex3(&track.tail));
+                put("oracle_armed", (track.armed as u32).to_string());
+                put("oracle_allowed_tyres_out", track.allowed_tyres_out.to_string());
+            }
+            if let Some(c) = &o.collide {
+                put("oracle_collide", "1".to_string());
+                put("oracle_collider_mesh", (c.collider_mesh as u32).to_string());
+                put("oracle_mesh_bounce_vel", format!("{:08x}", c.mesh_bounce_vel));
+                put("oracle_no_collision_steps", c.no_collision_steps.to_string());
+                put("oracle_floor", (c.floor as u32).to_string());
+            }
+        }
+        out.push_str("end\n");
+        out
+    }
+
+    /// Reads a header; returns the set-up and the number of bytes the header takes.
+    pub fn parse_header(bytes: &[u8]) -> Result<(SimSetup, usize), String> {
+        let mut setup = SimSetup::default();
+        let mut oracle: Option<OracleSetup> = None;
+        let mut at = 0;
+        let mut first = true;
+        loop {
+            let end = bytes[at..].iter().position(|b| *b == b'\n').ok_or("the header has no end line")? + at;
+            let line = std::str::from_utf8(&bytes[at..end]).map_err(|e| format!("the header is not text: {e}"))?;
+            let line = line.trim_end_matches('\r');
+            at = end + 1;
+            if first {
+                if line != MAGIC {
+                    return Err(format!("not a rustyAC input file (first line {line:?}, expected {MAGIC:?})"));
+                }
+                first = false;
+                continue;
+            }
+            if line == "end" {
+                break;
+            }
+            let (key, value) = line.split_once('=').ok_or(format!("header line without '=': {line:?}"))?;
+            let float = || value.parse::<f32>().map_err(|e| format!("{key}: {e}"));
+            let flag = || value != "0";
+            let e = &mut setup.env;
+            let blank = || OracleSetup {
+                scenario: String::new(),
+                ground: Ground::Flat,
+                pitlane: false,
+                stability_gain: 0.0,
+                wind_speed: 0.0,
+                wind_direction_deg: 0.0,
+                damage: [0.0; 5],
+                conditions: Default::default(),
+                track: None,
+                collide: None,
+            };
+            let blank_collide = || OracleCollide { collider_mesh: false, mesh_bounce_vel: 0, no_collision_steps: 0, floor: false };
+            let blank_track = || OracleTrack { folder: String::new(), layout: String::new(), objects: false, position: [0.0; 3], tail: [0.0, 0.0, -1.0], armed: false, allowed_tyres_out: -1 };
+            match key {
+                "car" => setup.car = value.to_string(),
+                "dt" => {
+                    if value != "0.003" {
+                        return Err(format!("dt={value}: only AC's 0.003 s step is supported"));
+                    }
+                }
+                "seed" => setup.seed = value.parse().map_err(|e| format!("seed: {e}"))?,
+                "render_seed" => setup.render_seed = value.parse().map_err(|e| format!("render_seed: {e}"))?,
+                "clock_start_ms" => setup.clock_start_ms = value.parse().map_err(|e| format!("clock_start_ms: {e}"))?,
+                "ambient_temperature" => e.ambient_temperature = float()?,
+                "road_temperature" => e.road_temperature = float()?,
+                "dynamic_grip_level" => e.dynamic_grip_level = float()?,
+                "tyre_consumption_rate" => e.tyre_consumption_rate = float()?,
+                "mechanical_damage_rate" => e.mechanical_damage_rate = float()?,
+                "fuel_consumption_rate" => e.fuel_consumption_rate = float()?,
+                "allow_tyre_blankets" => e.allow_tyre_blankets = flag(),
+                "penalty_mode" => e.penalty_mode = value.parse().map_err(|e| format!("penalty_mode: {e}"))?,
+                "ff_filter" => e.ff_filter = float()?,
+                "use_fake_understeer_ff" => e.use_fake_understeer_ff = flag(),
+                "damper_min_value" => e.damper_min_value = float()?,
+                "damper_gain" => e.damper_gain = float()?,
+                "trigger_slip_level" => e.trigger_slip_level = float()?,
+                "auto_clutch" => setup.auto_clutch = flag(),
+                "auto_shifter" => setup.auto_shifter = flag(),
+                "auto_blip" => setup.auto_blip = Some(flag()),
+                "session_starts_at_spawn" => setup.session_starts_at_spawn = flag(),
+                "teleport" => {
+                    let words: Vec<&str> = value.split(' ').collect();
+                    let [step, invalidate, position, tail] = words[..] else { return Err(format!("teleport: {value:?}")) };
+                    let step = step.parse().map_err(|e| format!("teleport: {e}"))?;
+                    setup.teleports.push((step, invalidate != "0", parse_hex3(position)?, parse_hex3(tail)?));
+                }
+                "esc_start" => setup.esc_start = flag(),
+                "drs_zones" => setup.drs_zones = flag(),
+                "ai_record" => setup.ai_record = flag(),
+                "session_type" => setup.session.session_type = Some(value.parse().map_err(|e| format!("session_type: {e}"))?),
+                "arm_first_lap" => setup.session.arm_first_lap = Some(flag()),
+                "ff_gain" => setup.ff_gain = float()?,
+                "ai" => {
+                    let parts: Vec<&str> = value.split(',').collect();
+                    let [player, laps, time_secs, start_delay_ms, seed, hand_over_step] = parts[..] else { return Err(format!("ai: six numbers expected, got {value:?}")) };
+                    let wrong = |e: String| format!("ai: {e}");
+                    setup.ai = AiSetup {
+                        player: player == "1",
+                        laps: laps.parse().map_err(|e: std::num::ParseIntError| wrong(e.to_string()))?,
+                        time_secs: time_secs.parse().map_err(|e: std::num::ParseFloatError| wrong(e.to_string()))?,
+                        start_delay_ms: start_delay_ms.parse().map_err(|e: std::num::ParseFloatError| wrong(e.to_string()))?,
+                        seed: seed.parse().map_err(|e: std::num::ParseIntError| wrong(e.to_string()))?,
+                        hand_over_step: hand_over_step.parse().map_err(|e: std::num::ParseIntError| wrong(e.to_string()))?,
+                        test_mode: setup.ai.test_mode,
+                    };
+                }
+                "ai_test_mode" => setup.ai.test_mode = flag(),
+                "referee" => setup.referee = Some(RefereeHeader::parse(value)?),
+                "pit_stop" => setup.referee.as_mut().ok_or("pit_stop before referee")?.pit = Some(PitHeader::parse(value)?),
+                "pit_menu_mouse" => setup.referee.as_mut().and_then(|referee| referee.pit.as_mut()).ok_or("pit_menu_mouse before pit_stop")?.mouse = value == "1",
+                "pit_cursor" => setup.referee.as_mut().and_then(|referee| referee.pit.as_mut()).ok_or("pit_cursor before pit_stop")?.settings.cursor_start = value.parse().map_err(|e| format!("pit_cursor: {e}"))?,
+                "pit_presets" => {
+                    let bytes: Option<Vec<u8>> = (0..value.len() / 2).map(|i| u8::from_str_radix(value.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+                    let text = bytes.and_then(|bytes| String::from_utf8(bytes).ok()).ok_or("pit_presets: hex text expected")?;
+                    setup.referee.as_mut().and_then(|referee| referee.pit.as_mut()).ok_or("pit_presets before pit_stop")?.presets_ini = Some(text);
+                }
+                "referee_driver" => setup.referee.as_mut().ok_or("referee_driver before referee")?.driver_names.push(value.to_string()),
+                "referee_session" => setup.referee.as_mut().ok_or("referee_session before referee")?.sessions.sessions.push(RefereeHeader::parse_session(value)?),
+                "opponent" => setup.opponents.push(Opponent::parse(value)?),
+                "opponent_place" => setup.opponents.last_mut().ok_or("opponent_place before any opponent")?.place = Some(GridPlace::parse(value)?),
+                "player_place" => setup.player_place = Some(GridPlace::parse(value)?),
+                "player_skin" => setup.player_skin = Some(value.to_string()),
+                "track" => setup.track = value.to_string(),
+                "layout" => setup.layout = value.to_string(),
+                "track_objects" => setup.track_objects = flag(),
+                "session_transfer" => setup.session_transfer = flag(),
+                "spawn" => setup.spawn = value.to_string(),
+                "wind" => {
+                    let [speed, direction] = hex_floats(key, value)?[..] else { return Err(format!("wind: two numbers expected, got {value:?}")) };
+                    setup.session.wind_speed = speed;
+                    setup.session.wind_direction_deg = direction;
+                }
+                "dynamic_track" => {
+                    let parts: Vec<&str> = value.splitn(3, ',').collect();
+                    let [external, enabled, numbers] = parts[..] else { return Err(format!("dynamic_track: {value:?}")) };
+                    let [session_start_grip, base_grip, random_grip, grip_per_lap, session_transfer, dynamic_grip_level] = hex_floats(key, numbers)?[..] else {
+                        return Err(format!("dynamic_track: six numbers expected, got {numbers:?}"));
+                    };
+                    setup.session.dynamic_track = Some(DynamicTrack {
+                        is_external: external != "0",
+                        enabled: enabled != "0",
+                        session_start_grip,
+                        base_grip,
+                        random_grip,
+                        grip_per_lap,
+                        session_transfer,
+                        dynamic_grip_level,
+                    });
+                }
+                "ballast_kg" => setup.session.ballast_kg = hex_floats(key, value)?.first().copied().unwrap_or(0.0),
+                "restrictor" => setup.session.restrictor = hex_floats(key, value)?.first().copied().unwrap_or(0.0),
+                "penalties" => setup.session.penalties = flag(),
+                "air_density_override" => e.air_density_override = hex_floats(key, value)?.first().copied(),
+                "experiment_tyre_pressure_law" => {
+                    let [at_26, per_degree] = hex_floats(key, value)?[..] else { return Err(format!("experiment_tyre_pressure_law: two numbers expected, got {value:?}")) };
+                    e.experiment_tyre_pressure_law = Some((at_26, per_degree));
+                }
+                "assists" => {
+                    let parts: Vec<&str> = value.split(',').collect();
+                    let [abs, traction_control, stability] = parts[..] else { return Err(format!("assists: {value:?}")) };
+                    let int = |text: &str| text.parse::<i32>().map_err(|e| format!("assists: {e}"));
+                    setup.session.assists = Some((int(abs)?, int(traction_control)?, hex_floats(key, stability)?.first().copied().unwrap_or(0.0)));
+                }
+                "setup_file" => setup.session.setup_file = Some(std::path::PathBuf::from(value)),
+                "oracle_scenario" => oracle.get_or_insert_with(blank).scenario = value.to_string(),
+                "oracle_collide" => {
+                    oracle.get_or_insert_with(blank).collide.get_or_insert_with(blank_collide);
+                }
+                "oracle_collider_mesh" => oracle.get_or_insert_with(blank).collide.get_or_insert_with(blank_collide).collider_mesh = flag(),
+                "oracle_mesh_bounce_vel" => {
+                    oracle.get_or_insert_with(blank).collide.get_or_insert_with(blank_collide).mesh_bounce_vel =
+                        u32::from_str_radix(value, 16).map_err(|e| format!("oracle_mesh_bounce_vel: {e}"))?
+                }
+                "oracle_no_collision_steps" => {
+                    oracle.get_or_insert_with(blank).collide.get_or_insert_with(blank_collide).no_collision_steps =
+                        value.parse().map_err(|e| format!("oracle_no_collision_steps: {e}"))?
+                }
+                "oracle_floor" => oracle.get_or_insert_with(blank).collide.get_or_insert_with(blank_collide).floor = flag(),
+                "oracle_ground" => {
+                    oracle.get_or_insert_with(blank).ground = Ground::parse(value).ok_or(format!("oracle_ground: {value:?}"))?
+                }
+                "oracle_pitlane" => oracle.get_or_insert_with(blank).pitlane = flag(),
+                "oracle_conditions" => oracle.get_or_insert_with(blank).conditions = rustyac_physics::car::replay::Conditions::decode(value)?,
+                "oracle_stability_gain" => oracle.get_or_insert_with(blank).stability_gain = float()?,
+                "oracle_wind_speed" => oracle.get_or_insert_with(blank).wind_speed = float()?,
+                "oracle_wind_direction_deg" => oracle.get_or_insert_with(blank).wind_direction_deg = float()?,
+                "oracle_damage" => {
+                    let mut damage = [0.0; 5];
+                    let parts: Vec<&str> = value.split(',').collect();
+                    if parts.len() != 5 {
+                        return Err(format!("oracle_damage: five numbers expected, got {value:?}"));
+                    }
+                    for (d, part) in damage.iter_mut().zip(parts) {
+                        *d = part.parse().map_err(|e| format!("oracle_damage: {e}"))?;
+                    }
+                    oracle.get_or_insert_with(blank).damage = damage;
+                }
+                "oracle_track_folder" => oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).folder = value.to_string(),
+                "oracle_track_layout" => oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).layout = value.to_string(),
+                "oracle_track_objects" => oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).objects = flag(),
+                "oracle_spawn_position" => oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).position = parse_hex3(value)?,
+                "oracle_spawn_tail" => oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).tail = parse_hex3(value)?,
+                "oracle_armed" => oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).armed = flag(),
+                "oracle_allowed_tyres_out" => {
+                    oracle.get_or_insert_with(blank).track.get_or_insert_with(blank_track).allowed_tyres_out =
+                        value.parse().map_err(|e| format!("oracle_allowed_tyres_out: {e}"))?
+                }
+                // a newer writer's key: an input file must never be half understood
+                other => return Err(format!("unknown header key {other:?}")),
+            }
+        }
+        setup.oracle = oracle;
+        Ok((setup, at))
+    }
+}
+
+/// A whole input file in memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputFile {
+    pub setup: SimSetup,
+    pub steps: Vec<StepInput>,
+}
+
+impl InputFile {
+    pub fn read(path: &Path) -> Result<InputFile, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut file = InputFile::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        file.setup.setup_jobs = read_setup_jobs(path)?;
+        file.setup.pit_jobs = read_pit_jobs(path)?;
+        Ok(file)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<InputFile, String> {
+        let (setup, at) = SimSetup::parse_header(bytes)?;
+        let body = &bytes[at..];
+        if !body.len().is_multiple_of(RECORD_SIZE) {
+            return Err(format!("{} bytes after the header are not a whole number of {RECORD_SIZE}-byte steps", body.len()));
+        }
+        Ok(InputFile { setup, steps: body.chunks_exact(RECORD_SIZE).map(StepInput::from_bytes).collect() })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = self.setup.header().into_bytes();
+        for step in &self.steps {
+            out.extend(step.to_bytes());
+        }
+        out
+    }
+
+    pub fn write(&self, path: &Path) -> Result<(), String> {
+        rustyac_content::guard::write(path, self.to_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// The file beside an input file that holds the setup editor's jobs (`<input>.setup`): none
+/// when the drive had none.
+pub fn setup_jobs_path(input: &Path) -> std::path::PathBuf {
+    let mut name = input.as_os_str().to_os_string();
+    name.push(".setup");
+    std::path::PathBuf::from(name)
+}
+
+/// One job a line: the step it is done before, its kind, its numbers (floats as their bits).
+pub fn setup_jobs_text(jobs: &[(u64, SetupJob)]) -> String {
+    let mut out = String::from("RUSTYAC-SETUP-JOBS 1\n");
+    for (step, job) in jobs {
+        let line = match *job {
+            SetupJob::Attach { item } => format!("attach {item}"),
+            SetupJob::SetNewValue { item, value } => format!("value {item} {:08x}", value.to_bits()),
+            SetupJob::SetTyreCompound { tyre, index } => format!("compound {tyre} {index}"),
+            SetupJob::SetRequestedFuel { value, spinner_value } => format!("fuel {:08x} {spinner_value}", value.to_bits()),
+            SetupJob::CycleTc { dir } => format!("tc {dir}"),
+            SetupJob::CycleAbs { dir } => format!("abs {dir}"),
+            SetupJob::SetTurboBoostLevel { level } => format!("turbo {:08x}", level.to_bits()),
+            SetupJob::CycleErsPower { dir } => format!("ers_power {dir}"),
+            SetupJob::CycleErsRecovery { dir } => format!("ers_recovery {dir}"),
+            SetupJob::CycleErsHeatCharging => "ers_heat".to_string(),
+            SetupJob::CycleEngineBrake { dir } => format!("engine_brake {dir}"),
+            SetupJob::SetUserFfGain { value } => format!("user_ff {:08x}", value.to_bits()),
+            SetupJob::SetFfMult { value } => format!("ff_mult {:08x}", value.to_bits()),
+            SetupJob::SetFfUpgrade { which, value } => format!("ff_upgrade {which} {:08x}", value.to_bits()),
+            SetupJob::SetBallastKg { kg } => format!("ballast {:08x}", kg.to_bits()),
+            SetupJob::SetSteerAssist { value } => format!("steer_assist {:08x}", value.to_bits()),
+            SetupJob::SetRestrictor { value } => format!("restrictor {:08x}", value.to_bits()),
+            SetupJob::SetDamageLevel { zone, value } => format!("damage {zone} {:08x}", value.to_bits()),
+            SetupJob::SetEngineLife { value } => format!("engine_life {:08x}", value.to_bits()),
+            SetupJob::SetAi { which, value, car } => format!("ai {which} {:08x} {car}", value.to_bits()),
+            SetupJob::AiRecording { what } => format!("ai_recording {what}"),
+            SetupJob::TempRun { on } => format!("temp_run {}", on as u8),
+            SetupJob::SetAutoflipRecovery { on } => format!("autoflip {}", on as u8),
+        };
+        out.push_str(&format!("{step} {line}\n"));
+    }
+    out
+}
+
+pub fn parse_setup_jobs(text: &str) -> Result<Vec<(u64, SetupJob)>, String> {
+    let mut lines = text.lines();
+    if lines.next() != Some("RUSTYAC-SETUP-JOBS 1") {
+        return Err("not a setup jobs file".to_string());
+    }
+    let mut jobs = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let bad = || format!("setup jobs: {line:?}");
+        let int = |i: usize| words.get(i).and_then(|w| w.parse::<i64>().ok()).ok_or_else(bad);
+        let float = |i: usize| words.get(i).and_then(|w| u32::from_str_radix(w, 16).ok()).map(f32::from_bits).filter(|v| v.is_finite()).ok_or_else(bad);
+        let step = u64::try_from(int(0)?).map_err(|_| bad())?;
+        // (the jobs are done in the file's order: a step may not be before the one above it)
+        if jobs.last().is_some_and(|(before, _): &(u64, SetupJob)| *before > step) {
+            return Err(bad());
+        }
+        let job = match words.get(1).copied().ok_or_else(bad)? {
+            "attach" => SetupJob::Attach { item: int(2)? as usize },
+            "value" => SetupJob::SetNewValue { item: int(2)? as usize, value: float(3)? },
+            "compound" => SetupJob::SetTyreCompound { tyre: int(2)? as usize, index: int(3)? as i32 },
+            "fuel" => SetupJob::SetRequestedFuel { value: float(2)?, spinner_value: int(3)? as i32 },
+            "tc" => SetupJob::CycleTc { dir: int(2)? as i32 },
+            "abs" => SetupJob::CycleAbs { dir: int(2)? as i32 },
+            "turbo" => SetupJob::SetTurboBoostLevel { level: float(2)? },
+            "ers_power" => SetupJob::CycleErsPower { dir: int(2)? as i32 },
+            "ers_recovery" => SetupJob::CycleErsRecovery { dir: int(2)? as i32 },
+            "ers_heat" => SetupJob::CycleErsHeatCharging,
+            "engine_brake" => SetupJob::CycleEngineBrake { dir: int(2)? as i32 },
+            "user_ff" => SetupJob::SetUserFfGain { value: float(2)? },
+            "ff_mult" => SetupJob::SetFfMult { value: float(2)? },
+            "ff_upgrade" => SetupJob::SetFfUpgrade { which: int(2)? as usize, value: float(3)? },
+            "ballast" => SetupJob::SetBallastKg { kg: float(2)? },
+            "steer_assist" => SetupJob::SetSteerAssist { value: float(2)? },
+            "restrictor" => SetupJob::SetRestrictor { value: float(2)? },
+            "damage" => SetupJob::SetDamageLevel { zone: int(2)? as usize, value: float(3)? },
+            "engine_life" => SetupJob::SetEngineLife { value: float(2)? },
+            // (before Task 44c: no car, car 0)
+            "ai" => SetupJob::SetAi { which: int(2)? as usize, value: float(3)?, car: if words.len() > 4 { int(4)? as usize } else { 0 } },
+            "ai_recording" => SetupJob::AiRecording { what: int(2)? as u8 },
+            "temp_run" => SetupJob::TempRun { on: int(2)? != 0 },
+            "autoflip" => SetupJob::SetAutoflipRecovery { on: int(2)? != 0 },
+            _ => return Err(bad()),
+        };
+        jobs.push((step, job));
+    }
+    Ok(jobs)
+}
+
+/// The jobs of the drive recorded in `input` (none: the drive had none).
+pub fn read_setup_jobs(input: &Path) -> Result<Vec<(u64, SetupJob)>, String> {
+    let path = setup_jobs_path(input);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_setup_jobs(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Written when a recording ends; an old file of a drive without jobs is taken away.
+pub fn write_setup_jobs(input: &Path, jobs: &[(u64, SetupJob)]) -> Result<(), String> {
+    let path = setup_jobs_path(input);
+    if jobs.is_empty() {
+        let _ = rustyac_content::guard::remove_file(&path);
+        return Ok(());
+    }
+    rustyac_content::guard::write(&path, setup_jobs_text(jobs)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What the pit menus hand the physics thread besides the keys: the presets of the pit strategy
+/// page, or a click on the old mouse menu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PitJob {
+    Presets(Vec<Vec<f32>>),
+    Click(MousePitClick),
+}
+
+/// The file beside an input file that holds its pit jobs (`<input>.pit`).
+pub fn pit_jobs_path(input: &Path) -> std::path::PathBuf {
+    let mut name = input.as_os_str().to_os_string();
+    name.push(".pit");
+    std::path::PathBuf::from(name)
+}
+
+/// One job a line: the step, then `presets` and every preset's values (floats as their bits,
+/// `,` between values, `/` between presets, `-` an empty one) or `click` and the control.
+pub fn pit_jobs_text(jobs: &[(u64, PitJob)]) -> String {
+    let mut out = String::from("RUSTYAC-PIT-JOBS 1\n");
+    for (step, job) in jobs {
+        let line = match job {
+            PitJob::Presets(presets) => {
+                let one = |p: &Vec<f32>| if p.is_empty() { "-".to_string() } else { p.iter().map(|v| format!("{:08x}", v.to_bits())).collect::<Vec<_>>().join(",") };
+                format!("presets {}", presets.iter().map(one).collect::<Vec<_>>().join("/"))
+            }
+            PitJob::Click(click) => match click {
+                MousePitClick::Tyre(n) => format!("click tyre {n}"),
+                MousePitClick::FuelDown => "click fuel_down".to_string(),
+                MousePitClick::FuelUp => "click fuel_up".to_string(),
+                MousePitClick::FuelFill => "click fuel_fill".to_string(),
+                MousePitClick::FuelGauge(share) => format!("click gauge {:08x}", share.to_bits()),
+                MousePitClick::RepairSuspension => "click repair_suspension".to_string(),
+                MousePitClick::RepairBody => "click repair_body".to_string(),
+                MousePitClick::RepairEngine => "click repair_engine".to_string(),
+                MousePitClick::Confirm => "click confirm".to_string(),
+            },
+        };
+        out.push_str(&format!("{step} {line}\n"));
+    }
+    out
+}
+
+pub fn parse_pit_jobs(text: &str) -> Result<Vec<(u64, PitJob)>, String> {
+    let mut lines = text.lines();
+    if lines.next() != Some("RUSTYAC-PIT-JOBS 1") {
+        return Err("not a pit jobs file".to_string());
+    }
+    let mut jobs: Vec<(u64, PitJob)> = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let bad = || format!("pit jobs: {line:?}");
+        let bits = |word: &str| u32::from_str_radix(word, 16).ok().map(f32::from_bits).filter(|v| v.is_finite());
+        let step: u64 = words.first().and_then(|w| w.parse().ok()).ok_or_else(bad)?;
+        if jobs.last().is_some_and(|(before, _)| *before > step) {
+            return Err(bad());
+        }
+        let job = match (words.get(1).copied(), words.get(2).copied()) {
+            (Some("presets"), Some(all)) => PitJob::Presets(
+                all.split('/').map(|p| if p == "-" { Some(Vec::new()) } else { p.split(',').map(bits).collect() }).collect::<Option<Vec<_>>>().ok_or_else(bad)?,
+            ),
+            (Some("click"), Some(control)) => PitJob::Click(match control {
+                "tyre" => MousePitClick::Tyre(words.get(3).and_then(|w| w.parse().ok()).ok_or_else(bad)?),
+                "fuel_down" => MousePitClick::FuelDown,
+                "fuel_up" => MousePitClick::FuelUp,
+                "fuel_fill" => MousePitClick::FuelFill,
+                "gauge" => MousePitClick::FuelGauge(words.get(3).and_then(|w| bits(w)).ok_or_else(bad)?),
+                "repair_suspension" => MousePitClick::RepairSuspension,
+                "repair_body" => MousePitClick::RepairBody,
+                "repair_engine" => MousePitClick::RepairEngine,
+                "confirm" => MousePitClick::Confirm,
+                _ => return Err(bad()),
+            }),
+            _ => return Err(bad()),
+        };
+        jobs.push((step, job));
+    }
+    Ok(jobs)
+}
+
+/// The pit jobs of the drive recorded in `input` (none: the drive had none).
+pub fn read_pit_jobs(input: &Path) -> Result<Vec<(u64, PitJob)>, String> {
+    let path = pit_jobs_path(input);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_pit_jobs(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Written when a recording ends; an old file of a drive without pit jobs is taken away.
+pub fn write_pit_jobs(input: &Path, jobs: &[(u64, PitJob)]) -> Result<(), String> {
+    let path = pit_jobs_path(input);
+    if jobs.is_empty() {
+        let _ = rustyac_content::guard::remove_file(&path);
+        return Ok(());
+    }
+    rustyac_content::guard::write(&path, pit_jobs_text(jobs)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Writes an input file step by step while a drive runs.
+pub struct InputWriter {
+    file: std::io::BufWriter<std::fs::File>,
+    pub steps: u64,
+}
+
+impl InputWriter {
+    pub fn create(path: &Path, setup: &SimSetup) -> Result<InputWriter, String> {
+        let file = rustyac_content::guard::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut file = std::io::BufWriter::new(file);
+        file.write_all(setup.header().as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(InputWriter { file, steps: 0 })
+    }
+
+    pub fn push(&mut self, step: &StepInput) -> Result<(), String> {
+        self.steps += 1;
+        self.file.write_all(&step.to_bytes()).map_err(|e| format!("writing the input file: {e}"))
+    }
+
+    pub fn finish(mut self) -> Result<u64, String> {
+        self.file.flush().map_err(|e| format!("writing the input file: {e}"))?;
+        Ok(self.steps)
+    }
+}
+
+#[cfg(test)]
+mod setup_jobs_tests {
+    use super::*;
+
+    /// Every kind of job comes back from its line as it went in, floats to the bit.
+    #[test]
+    fn jobs_round_trip() {
+        let jobs = vec![
+            (0, SetupJob::Attach { item: 7 }),
+            (0, SetupJob::SetNewValue { item: 7, value: -0.0 }),
+            (12, SetupJob::SetNewValue { item: 31, value: f32::from_bits(0x3dcc_cccd) }),
+            (12, SetupJob::SetTyreCompound { tyre: 3, index: 2 }),
+            (40, SetupJob::SetRequestedFuel { value: 37.5, spinner_value: 37 }),
+            (41, SetupJob::CycleTc { dir: -1 }),
+            (41, SetupJob::CycleAbs { dir: 1 }),
+            (90, SetupJob::SetTurboBoostLevel { level: 0.7 }),
+            (91, SetupJob::CycleErsPower { dir: 1 }),
+            (92, SetupJob::CycleErsRecovery { dir: -1 }),
+            (93, SetupJob::CycleErsHeatCharging),
+            (u64::from(u32::MAX) + 5, SetupJob::CycleEngineBrake { dir: 1 }),
+            (u64::from(u32::MAX) + 6, SetupJob::SetUserFfGain { value: 1.25 }),
+            (u64::from(u32::MAX) + 6, SetupJob::SetFfMult { value: 0.0027 }),
+            (u64::from(u32::MAX) + 7, SetupJob::SetFfUpgrade { which: 2, value: 0.5 }),
+            (u64::from(u32::MAX) + 8, SetupJob::SetBallastKg { kg: 35.0 }),
+            (u64::from(u32::MAX) + 9, SetupJob::SetRestrictor { value: 100.0 }),
+            (u64::from(u32::MAX) + 9, SetupJob::SetDamageLevel { zone: 4, value: 80.0 }),
+            (u64::from(u32::MAX) + 9, SetupJob::SetEngineLife { value: 0.0 }),
+            (u64::from(u32::MAX) + 9, SetupJob::SetAi { which: 2, value: 7.5, car: 1 }),
+            (u64::from(u32::MAX) + 9, SetupJob::SetAutoflipRecovery { on: false }),
+            (u64::from(u32::MAX) + 10, SetupJob::AiRecording { what: 2 }),
+            (u64::from(u32::MAX) + 11, SetupJob::TempRun { on: true }),
+        ];
+        let text = setup_jobs_text(&jobs);
+        let back = parse_setup_jobs(&text).unwrap();
+        assert_eq!(back.len(), jobs.len());
+        for ((step, job), (step_back, job_back)) in jobs.iter().zip(&back) {
+            assert_eq!(step, step_back);
+            assert_eq!(format!("{job:?}"), format!("{job_back:?}"));
+        }
+        assert_eq!(setup_jobs_text(&back), text);
+        assert!(parse_setup_jobs("something else\n").is_err());
+        assert!(parse_setup_jobs("RUSTYAC-SETUP-JOBS 1\n3 nonsense 1\n").is_err());
+        // a step before the one above it, a negative step, a number that is none
+        assert!(parse_setup_jobs("RUSTYAC-SETUP-JOBS 1\n5 tc 1\n4 tc 1\n").is_err());
+        assert!(parse_setup_jobs("RUSTYAC-SETUP-JOBS 1\n-1 tc 1\n").is_err());
+        assert!(parse_setup_jobs("RUSTYAC-SETUP-JOBS 1\n1 turbo 7fc00000\n").is_err());
+    }
+
+    /// The oracle's teleports come back from the header as they went in, floats to the bit.
+    #[test]
+    fn teleports_round_trip() {
+        let setup = SimSetup { teleports: vec![(0, false, [1.5, -0.0, 3.25], [0.0, 0.0, -1.0]), (18449, true, [-12.75, 400.5, f32::from_bits(0x3dcc_cccd)], [0.6, 0.0, 0.8])], ..SimSetup::default() };
+        let (back, _) = SimSetup::parse_header(setup.header().as_bytes()).unwrap();
+        assert_eq!(format!("{:?}", back.teleports), format!("{:?}", setup.teleports));
+        assert!(SimSetup::parse_header(format!("{MAGIC}\nteleport=1 0 00000000\nend\n").as_bytes()).is_err());
+    }
+
+    #[test]
+    fn pit_jobs_round_trip() {
+        let jobs = vec![
+            (3, PitJob::Presets(vec![vec![12.5, 2.0], Vec::new(), vec![-1.0]])),
+            (3, PitJob::Click(MousePitClick::Tyre(2))),
+            (9, PitJob::Click(MousePitClick::FuelGauge(0.625))),
+            (9, PitJob::Click(MousePitClick::Confirm)),
+        ];
+        let text = pit_jobs_text(&jobs);
+        assert_eq!(parse_pit_jobs(&text).unwrap(), jobs);
+        assert!(parse_pit_jobs("RUSTYAC-PIT-JOBS 1\n5 click confirm\n4 click confirm\n").is_err());
+        assert!(parse_pit_jobs("RUSTYAC-PIT-JOBS 1\n1 click gauge 7fc00000\n").is_err());
+        assert!(parse_pit_jobs("RUSTYAC-PIT-JOBS 1\n1 presets 3f80000g\n").is_err());
+    }
+}

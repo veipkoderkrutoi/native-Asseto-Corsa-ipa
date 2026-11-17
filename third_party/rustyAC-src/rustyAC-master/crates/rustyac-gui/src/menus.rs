@@ -1,0 +1,547 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from Assetto Corsa (acs.exe, Kunos Simulazioni).
+
+//! The game's menus on top of the widgets, and the few functions of `Sim` they call.
+//!
+//! `PauseMenu` (0x200 bytes): `PauseMenu::PauseMenu` 0x14011d9b0, `render` 0x14011f990,
+//! `onVisibleChanged` 0x14011f870, `blankButton` 0x14011f400, `getButtonByName` 0x14011f670,
+//! its six click handlers (Resume 0x14011f140, Back to pits 0x14011edb0, Skip session
+//! 0x14011eaf0, Restart session 0x14011f200, Replay 0x14011eec0, Exit 0x14011f1b0) and the two
+//! jobs they leave for the end of the camera's fade (0x14011ec90, 0x14011f2a0).
+//!
+//! Of `Sim`: `activateGameGui` 0x1401977e0, `activateEscMenu` 0x140197780, `activatePauseMenu`
+//! 0x140197840 (which of the ESC menu, the pause menu, the game screen and the app bar show),
+//! and of `ACCameraManager` `registerToFadeInEvent` 0x140033ce0 and `fadeIn` 0x140033690 as far
+//! as the menus use them.
+//!
+//! The game's menus reach into `Sim` (the referee, the cars, the replay, the sound). Here they
+//! read a [`SimLink`] that whoever runs the GUI keeps up to date, and what they ask of the
+//! session is left there as a list of [`SimAction`]s, in the order the game makes the calls.
+
+use std::rc::Rc;
+
+use rustyac_physics::data::ini::IniReader;
+
+use crate::control::{Clicked, Id, Kind};
+use crate::font::{Font, FontType};
+use crate::gui::Gui;
+use crate::hud::translate;
+use crate::painter::{Painter, Texture, GRAPHICS_GL};
+
+/// `SessionType::Race`.
+pub const SESSION_RACE: i32 = 3;
+
+/// `PauseMenuButton` (the argument of `PauseMenu::blankButton`).
+pub const PAUSE_MENU_RESUME: i32 = 0;
+pub const PAUSE_MENU_PITS: i32 = 1;
+pub const PAUSE_MENU_RESTART: i32 = 2;
+pub const PAUSE_MENU_REPLAY: i32 = 3;
+pub const PAUSE_MENU_EXIT: i32 = 4;
+pub const PAUSE_MENU_SKIP: i32 = 5;
+
+/// A call a menu makes on the session, for whoever runs the GUI to carry out.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SimAction {
+    /// `Sim::setPauseMode` 0x14019e6d0
+    SetPauseMode(bool),
+    /// `SystemMessage::clearMessage` 0x1401b6400
+    ClearMessage,
+    /// `AudioEngine::stop` / `AudioEngine::start`
+    AudioStop,
+    AudioStart,
+    /// `RaceManager::skipCurrentSession` 0x140141350
+    SkipCurrentSession,
+    /// `RaceManager::restartCurrentSession` 0x140140d00
+    RestartCurrentSession,
+    /// `ACCameraManager::fadeIn` 0x140033690 with this `fadeTotalTime`; when the fade is over
+    /// the runner calls [`Gui::sim_fade_in_finished`]
+    FadeIn(f32),
+    /// `CarAvatar::lockControlsUntilTime(ms, now, true)` 0x1400d8e20 on the player's car
+    LockControlsUntilTime(f64),
+    /// `CarAvatar::goToSpawnPosition` on the player's car
+    GoToSpawnPosition(String),
+    /// `ReplayManager::startReplayMode(0)`
+    StartReplayMode,
+    /// `Game::shutdown` 0x140242fb0
+    Shutdown,
+    /// the CRT's `exit(code)`: the process ends at once, nothing saved
+    Exit(i32),
+    /// `ACClient::sendVote(type, value, guid)` 0x140052ba0 (2: kick this car)
+    SendVote { kind: i32, value: bool, guid: i32 },
+    /// `Sim::setFocusedCarIndex` 0x14019e6b0
+    SetFocusedCarIndex(u32),
+    /// `ACCameraManager::setMode(mode, false, false)` 0x1400340d0
+    SetCameraMode(i32),
+    /// `CameraOnBoardFree::setIntroMode` 0x140115c80
+    SetIntroMode(bool),
+    /// `CarAvatar::setControlsLock` 0x1400d9f00 on the player's car
+    SetControlsLock(bool),
+    /// `SystemMessage::addMessage(title, text, eDefault)` 0x1401b61c0
+    AddMessage { title: String, text: String },
+    /// `ACClient::sendChat` 0x140052a90 (the chat's line, as it was written)
+    SendChat(String),
+    /// `RaceManager::startRace` 0x140141470 (the wait before the start, in ms)
+    StartRace(f32),
+    /// `Sim::focusedCarIndex = 0` (the member is written, no function is called)
+    FocusPlayerCar,
+    /// `ESCMenu::evOnDriveMenuPressed` (the drag race and the pit crew listen)
+    DriveMenuPressed,
+    /// `ACCameraManager::loadPreviousSessionUserCamera`
+    LoadPreviousSessionUserCamera,
+    /// a call of the replay's bar on `ReplayManager`
+    Replay(crate::replay_interface::ReplayAction),
+    /// `CameraDrivableManager::setCurrentCamera` 0x1400c6960 (0 to 4: chase 1, chase 2,
+    /// bonnet, bumper, dash), `CameraTrack::setCurrentCameraSet` 0x1400cbe10
+    SetDrivableCamera(i32),
+    SetTrackCameraSet(i32),
+    /// `ACCameraManager::setMode(mode, true, false)`: the mode is set as it is (0 cockpit,
+    /// 2 the cameras that drive with the car, 3 the track's); when it is done the runner
+    /// tells the replay's bar the camera's number ([`Gui::replay_on_camera_selected_index`])
+    SetCameraModeKept(i32),
+}
+
+/// What a handler of `ACCameraManager::evOnFadeInFinished` does when the fade is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FadeJob {
+    /// the pause menu's "Back to pits" (0x14011ec90)
+    BackToPits,
+    /// the pause menu's "Replay" (0x14011f2a0)
+    StartReplay,
+    /// the ESC menu's "Drive" (`Sim::startGame`'s job 0x140195cf0)
+    Drive,
+}
+
+/// What the menus read of `Sim`, and what they ask of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SimLink {
+    /// `Sim::gameScreen`, `Sim::pauseMenu`, `Sim::escMenu`
+    pub game_screen: Option<Id>,
+    pub pause_menu: Option<Id>,
+    pub esc_menu: Option<Id>,
+    /// `RaceManager::getCurrentSessionType`
+    pub session_type: i32,
+    /// `RaceManager::getSessionCount`
+    pub session_count: u32,
+    /// `Sim::client` is there
+    pub online: bool,
+    /// `RaceManager::getTimeToSessionStart`
+    pub time_to_session_start: f64,
+    /// the game object "REPLAY_MANAGER" is there
+    pub has_replay_manager: bool,
+    /// `ReplayManager::isInReplaymode`
+    pub in_replay: bool,
+    /// `ACCameraManager::mode`
+    pub camera_mode: i32,
+    /// `Sim::isVrConnected`
+    pub vr_connected: bool,
+    /// `ACCameraManager::evOnFadeInFinished`: who hung a job there, and the job
+    pub fade_listeners: Vec<(Id, FadeJob)>,
+    /// `ACCameraManager::fadeMode.sender`
+    pub fade_sender: Option<Id>,
+    pub actions: Vec<SimAction>,
+    /// what the tables read of `RaceManager` (see `leaderboard`)
+    pub race: crate::leaderboard::RaceLink,
+    /// `Sim::flagMapCache`: the nations' flags that were asked for
+    pub flag_cache: std::collections::BTreeMap<String, Texture>,
+    /// every `ACStandardLeaderboard` (they hear `Sim::evOnNewSession`)
+    pub leaderboards: Vec<Id>,
+    /// the player's car's `physicsState.setupState` (0 not known yet, 1 legal, 2 illegal)
+    pub setup_state: i32,
+    /// `RaceManager::fixedSetup`
+    pub fixed_setup: bool,
+    /// `Sim::isInTripleScreenMode`
+    pub triple_screen: bool,
+    /// `RaceManager::getTimetoWait`, `getSessionTimeLeft`; `Game::gameTime.now` (ms)
+    pub time_to_wait: f64,
+    pub session_time_left: f64,
+    pub game_time: f64,
+    /// `CarAvatar::isInPit` of the player's car
+    pub player_in_pit: bool,
+    /// `Track::dynamicGripLevel`
+    pub track_grip: f32,
+    /// `GraphicsManager::lightingSettings.angle` (the sun's)
+    pub sun_angle: f32,
+    /// `PhysicsAvatar::getTemperatureInfo`
+    pub ambient_temperature: f32,
+    pub road_temperature: f32,
+    /// `PhysicsAvatar::windData`: `speed.value`, `directionDEG`
+    pub wind_speed: f32,
+    pub wind_direction_deg: f32,
+    /// what the replay's bar reads of `ReplayManager` and `ACCameraManager`
+    pub replay: crate::replay_interface::ReplayLink,
+    /// what the ESC menu's page "Time" reads besides `race`
+    pub time: crate::time_table::TimeLink,
+    /// what the ESC menu's page "Telemetry" reads (Task 33)
+    pub telemetry: crate::comparative_telemetry::TelemetryLink,
+    /// what the online pages read of `ACClient` (Task 34)
+    pub online_link: crate::race_control_online::OnlineLink,
+    /// Task 45: the time-attack mode (`getGameObject<TimeAttack>`), when the session is one
+    pub time_attack: Option<crate::time_attack::TimeAttackLink>,
+    /// Task 45: a drift session's mode
+    pub drift: Option<crate::drift::DriftLink>,
+    /// Task 45: a drag race's mode
+    pub drag: Option<crate::drag::DragLink>,
+}
+
+/// `PauseMenu`'s own members.
+pub struct PauseMenu {
+    pub ac_logo: Texture,
+    pub buttons: Vec<Id>,
+    pub currently_selected_button: i32,
+    pub fade_seconds: f32,
+}
+
+/// A menu of the game: a `ksgui::Control` with a `render` and an `onVisibleChanged` of its own.
+pub enum Menu {
+    Pause(PauseMenu),
+    Leaderboard(Box<crate::leaderboard::Leaderboard>),
+    EndCommon(crate::end_session::EndCommon),
+    Esc(Box<crate::esc_menu::EscMenu>),
+    RaceControl(crate::esc_menu::RaceControlScreen),
+    SpSession(crate::esc_menu::SpSession),
+    SessionServer(crate::race_control_online::SessionServer),
+    Voting(crate::race_control_online::Voting),
+    AcChat(Box<crate::race_control_online::AcChat>),
+    SessionInfo(Box<crate::esc_menu::SessionInfo>),
+    Replay(Box<crate::replay_interface::ReplayInterface>),
+    SetupScreen(Box<crate::setup_screen::SetupScreen>),
+    SetupTab(Box<crate::setup_tab::SetupTab>),
+    SetupInfo(Box<crate::setup_info::SetupInformation>),
+    TimeTable(Box<crate::time_table::TimeTable>),
+}
+
+impl Gui {
+    // ----- Sim -----
+
+    fn sim_show(&mut self, esc: bool, pause: bool, screen: bool) {
+        if let Some(id) = self.sim.esc_menu {
+            self.set_visible(id, esc);
+        }
+        if let Some(id) = self.sim.pause_menu {
+            self.set_visible(id, pause);
+        }
+        if let Some(id) = self.sim.game_screen {
+            self.set_visible(id, screen);
+        }
+        self.set_visible(self.taskbar, screen);
+    }
+
+    /// `Sim::activateGameGui` 0x1401977e0.
+    pub fn sim_activate_game_gui(&mut self) {
+        self.sim_show(false, false, true);
+    }
+
+    /// `Sim::activateEscMenu` 0x140197780.
+    pub fn sim_activate_esc_menu(&mut self) {
+        self.sim_show(true, false, false);
+    }
+
+    /// `Sim::activatePauseMenu` 0x140197840.
+    pub fn sim_activate_pause_menu(&mut self) {
+        self.sim_show(false, true, false);
+    }
+
+    /// `Sim::setPauseMode` 0x14019e6d0 (what it does is the runner's).
+    pub fn sim_set_pause_mode(&mut self, paused: bool) {
+        self.sim.actions.push(SimAction::SetPauseMode(paused));
+    }
+
+    /// `ACCameraManager::registerToFadeInEvent` 0x140033ce0: a fade that still runs ends here
+    /// and now (its jobs are done, and the jobs of who started it are taken off), then the new
+    /// job is hung up.
+    pub fn sim_register_to_fade_in_event(&mut self, owner: Id, job: FadeJob) {
+        if !self.sim.fade_listeners.is_empty() {
+            for (_, job) in self.sim.fade_listeners.clone() {
+                self.sim_run_fade_job(job);
+            }
+            let sender = self.sim.fade_sender;
+            self.sim.fade_listeners.retain(|(owner, _)| Some(*owner) != sender);
+        }
+        self.sim.fade_listeners.push((owner, job));
+    }
+
+    /// `ACCameraManager::fadeIn` 0x140033690.
+    pub fn sim_fade_in(&mut self, total_time: f32, sender: Id) {
+        self.sim.fade_sender = Some(sender);
+        self.sim.actions.push(SimAction::FadeIn(total_time));
+    }
+
+    /// The camera's fade is over: every job hung on it is done, and the list is emptied.
+    pub fn sim_fade_in_finished(&mut self) {
+        for (_, job) in std::mem::take(&mut self.sim.fade_listeners) {
+            self.sim_run_fade_job(job);
+        }
+    }
+
+    fn sim_run_fade_job(&mut self, job: FadeJob) {
+        match job {
+            // lambda 0x14011ec90
+            FadeJob::BackToPits => {
+                if self.sim.session_type == SESSION_RACE {
+                    self.sim.actions.push(SimAction::LockControlsUntilTime(20000.0));
+                } else {
+                    self.sim.actions.push(SimAction::GoToSpawnPosition("PIT".to_string()));
+                }
+                self.sim_activate_esc_menu();
+                self.sim_set_pause_mode(false);
+            }
+            // lambda 0x14011f2a0
+            FadeJob::StartReplay => {
+                self.sim_activate_game_gui();
+                self.sim_set_pause_mode(false);
+                if self.sim.has_replay_manager {
+                    self.sim.actions.push(SimAction::StartReplayMode);
+                }
+            }
+            FadeJob::Drive => self.sim_drive(),
+        }
+    }
+
+    // ----- PauseMenu -----
+
+    pub fn pause_menu(&self, id: Id) -> &PauseMenu {
+        match &self.controls[id].kind {
+            Kind::Menu(menu) => match &**menu {
+                Menu::Pause(p) => p,
+                _ => panic!("control {id} is not the pause menu"),
+            },
+            _ => panic!("control {id} is not the pause menu"),
+        }
+    }
+
+    pub fn pause_menu_mut(&mut self, id: Id) -> &mut PauseMenu {
+        match &mut self.controls[id].kind {
+            Kind::Menu(menu) => match &mut **menu {
+                Menu::Pause(p) => p,
+                _ => panic!("control {id} is not the pause menu"),
+            },
+            _ => panic!("control {id} is not the pause menu"),
+        }
+    }
+
+    /// `PauseMenu::PauseMenu` 0x14011d9b0. `fades` is `system/cfg/fades.ini`. The session's
+    /// type, the number of sessions and whether the game is online are read from [`Gui::sim`].
+    pub fn new_pause_menu(&mut self, painter: &mut dyn Painter, fades: Option<&IniReader>) -> Id {
+        let id = self.new_control(painter, "PAUSE_MENU");
+        let mut fade_seconds = 0.0f32;
+        if let Some(ini) = fades.filter(|ini| ini.ready) {
+            fade_seconds = ini.get_float("FADE", "MS").unwrap_or(0.0) * f32::from_bits(0x3a83_126f);
+        }
+        self.fonts.push(Font::new(painter, "", FontType::Proportional, 22.0, false, false));
+        let font = self.fonts.len() - 1;
+        self.controls[id].font = Some(font);
+        self.control_set_size(id, 400.0, 400.0);
+        let ac_logo = painter.get_texture("content/gui/pauseMenuLogo.png");
+        let height = if ac_logo.kid.is_some() { painter.texture_size(&ac_logo).1 } else { 0 };
+        let mut y = height as f32 * 0.5 + 2.0;
+        self.controls[id].back_color = [0.0, 0.0, 0.0, 0.5];
+        self.controls[id].border_color = [0.25, 0.25, 0.25, 0.5];
+        self.controls[id].kind = Kind::Menu(Box::new(Menu::Pause(PauseMenu { ac_logo, buttons: Vec::new(), currently_selected_button: 0, fade_seconds })));
+
+        let menu = id;
+        // Resume (0x14011f140)
+        self.pause_menu_button(painter, menu, font, "RESUME", "Resume", y, |gui, _menu, ev| {
+            if !gui.active_button(ev.control).blanked {
+                gui.sim_activate_game_gui();
+                gui.sim_set_pause_mode(false);
+            }
+        });
+        y = y + 45.0;
+        // Back to pits (0x14011edb0)
+        self.pause_menu_button(painter, menu, font, "PITS", "Back to pits", y, |gui, menu, ev| {
+            if !gui.active_button(ev.control).blanked {
+                if gui.sim.session_type == SESSION_RACE && 0.0 < gui.sim.time_to_session_start {
+                    return;
+                }
+                gui.set_visible(menu, false);
+                gui.sim_register_to_fade_in_event(menu, FadeJob::BackToPits);
+                let seconds = gui.pause_menu(menu).fade_seconds;
+                gui.sim_fade_in(seconds, menu);
+            }
+        });
+        y = y + 45.0;
+        if self.sim.session_count > 1 && self.sim.session_type != SESSION_RACE && !self.sim.online {
+            // Skip session (0x14011eaf0): `RaceManager::skipCurrentSession` always answers yes,
+            // so the "Wait for AI cars to complete at least 3 laps" message is never made
+            self.pause_menu_button(painter, menu, font, "SKIP", "Skip session", y, |gui, menu, ev| {
+                gui.sim.actions.push(SimAction::SkipCurrentSession);
+                gui.sim_activate_game_gui();
+                gui.sim_set_pause_mode(false);
+                if !gui.active_button(ev.control).blanked {
+                    gui.set_visible(menu, false);
+                }
+            });
+            y = y + 45.0;
+        }
+        if !self.sim.online {
+            // Restart session (0x14011f200)
+            self.pause_menu_button(painter, menu, font, "RESTART", "Restart Session", y, |gui, menu, ev| {
+                if !gui.active_button(ev.control).blanked {
+                    gui.set_visible(menu, false);
+                    gui.sim.actions.push(SimAction::RestartCurrentSession);
+                    gui.sim_activate_game_gui();
+                    gui.sim_set_pause_mode(false);
+                }
+            });
+            y = y + 45.0;
+            // Replay (0x14011eec0)
+            self.pause_menu_button(painter, menu, font, "REPLAY", "Replay", y, |gui, menu, ev| {
+                if !gui.active_button(ev.control).blanked {
+                    gui.set_visible(menu, false);
+                    gui.sim_register_to_fade_in_event(menu, FadeJob::StartReplay);
+                    let seconds = gui.pause_menu(menu).fade_seconds;
+                    gui.sim_fade_in(seconds, menu);
+                }
+            });
+            y = y + 45.0;
+        }
+        y = y + 45.0;
+        // Exit (0x14011f1b0)
+        self.pause_menu_button(painter, menu, font, "EXIT", "Exit", y, |gui, menu, ev| {
+            if !gui.active_button(ev.control).blanked {
+                gui.set_visible(menu, false);
+                gui.sim.actions.push(SimAction::Shutdown);
+            }
+        });
+        y = y + 45.0;
+        self.control_set_size(id, 400.0, y + 50.0);
+        id
+    }
+
+    fn pause_menu_button(&mut self, painter: &mut dyn Painter, menu: Id, font: usize, name: &str, text: &str, y: f32, handler: impl Fn(&mut Gui, Id, &Clicked) + 'static) {
+        let button = self.new_active_button(painter, name);
+        self.control_add_control(menu, button);
+        let c = &mut self.controls[button];
+        c.draw_border = false;
+        c.draw_background = false;
+        c.font = Some(font);
+        let b = self.active_button_mut(button);
+        b.unselected_color = [0.0; 4];
+        b.roll_on_color = [0.25, 0.25, 0.25, 0.8];
+        b.selected_color = [0.8, 0.8, 0.8, 0.7];
+        self.set_size(button, 400.0, 45.0);
+        self.active_button_mut(button).text_coord[1] = 7.0;
+        self.set_position(button, 0.0, y);
+        self.set_text(button, &translate(text));
+        self.controls[button].ev_clicked.push(Rc::new(move |gui: &mut Gui, ev: &Clicked| handler(gui, menu, ev)));
+        self.pause_menu_mut(menu).buttons.push(button);
+    }
+
+    /// `PauseMenu::getButtonByName` 0x14011f670.
+    pub fn pause_menu_button_by_name(&self, id: Id, name: &str) -> Option<Id> {
+        self.pause_menu(id).buttons.iter().copied().find(|b| self.controls[*b].name == name)
+    }
+
+    /// `PauseMenu::blankButton` 0x14011f400.
+    pub fn pause_menu_blank_button(&mut self, id: Id, button: i32, blanked: bool) {
+        let name = match button {
+            PAUSE_MENU_RESUME => "RESUME",
+            PAUSE_MENU_PITS => "PITS",
+            PAUSE_MENU_RESTART => "RESTART",
+            PAUSE_MENU_REPLAY => "REPLAY",
+            PAUSE_MENU_EXIT => "EXIT",
+            PAUSE_MENU_SKIP => "SKIP",
+            _ => return,
+        };
+        if let Some(b) = self.pause_menu_button_by_name(id, name) {
+            self.active_button_mut(b).blanked = blanked;
+        }
+    }
+
+    /// `PauseMenu::onVisibleChanged` 0x14011f870 (the children are not told).
+    fn pause_menu_on_visible_changed(&mut self, id: Id, visible: bool) {
+        if self.sim.session_type == SESSION_RACE {
+            if let Some(skip) = self.pause_menu_button_by_name(id, "SKIP") {
+                self.active_button_mut(skip).blanked = true;
+            }
+        }
+        self.sim.actions.push(SimAction::ClearMessage);
+        self.sim.actions.push(if visible { SimAction::AudioStop } else { SimAction::AudioStart });
+        let selected = self.pause_menu(id).currently_selected_button;
+        if selected != -1 {
+            let button = self.pause_menu(id).buttons[selected as usize];
+            self.active_button_mut(button).selected = false;
+            self.pause_menu_mut(id).currently_selected_button = -1;
+        }
+    }
+
+    /// `PauseMenu::render` 0x14011f990: the menu in the middle of the screen, the logo over
+    /// its top edge.
+    fn pause_menu_render(&mut self, id: Id, dt: f32, painter: &mut dyn Painter) {
+        let (width, height) = painter.screen();
+        let r = self.controls[id].rect;
+        let y = height as f32 * 0.5 - (r.bottom - r.top) * 0.5;
+        let x = width as f32 * 0.5 - (r.right - r.left) * 0.5;
+        self.set_position(id, x, y);
+        self.control_render(id, dt, painter);
+        let mut r = self.controls[id].rect;
+        self.get_world_rect(id, &mut r);
+        painter.gl_color4f(GRAPHICS_GL, 1.0, 1.0, 1.0, 1.0);
+        let logo = self.pause_menu(id).ac_logo.clone();
+        painter.set_texture(0, &logo);
+        let (w, h) = if logo.kid.is_some() { painter.texture_size(&logo) } else { (0, 0) };
+        let qx = ((r.right - r.left) * 0.5 + r.left) - w as f32 * 0.5;
+        let qy = r.top - h as f32 * 0.5;
+        painter.gl_quad(GRAPHICS_GL, qx, qy, w as f32, h as f32, true);
+    }
+
+    // ----- the virtual functions of the menus -----
+
+    pub fn menu_render(&mut self, id: Id, dt: f32, painter: &mut dyn Painter) {
+        match &self.controls[id].kind {
+            Kind::Menu(menu) => match &**menu {
+                Menu::Pause(_) => self.pause_menu_render(id, dt, painter),
+                Menu::Leaderboard(_) => self.leaderboard_render(id, dt, painter),
+                Menu::EndCommon(_) => self.end_common_render(id, dt, painter),
+                Menu::Esc(_) => self.esc_menu_render(id, dt, painter),
+                Menu::RaceControl(_) => self.race_control_render(id, dt, painter),
+                Menu::SpSession(_) => self.sp_session_render(id, dt, painter),
+                Menu::SessionServer(_) => self.session_server_render(id, dt, painter),
+                Menu::Voting(_) => self.voting_render(id, dt, painter),
+                Menu::AcChat(_) => self.ac_chat_render(id, dt, painter),
+                Menu::SessionInfo(_) => self.session_info_render(id, dt, painter),
+                Menu::Replay(_) => self.replay_render(id, dt, painter),
+                Menu::SetupScreen(_) => self.setup_screen_render(id, dt, painter),
+                Menu::SetupTab(_) => self.setup_tab_render(id, dt, painter),
+                Menu::SetupInfo(_) => self.setup_information_render(id, dt, painter),
+                Menu::TimeTable(_) => self.time_table_render(id, dt, painter),
+            },
+            _ => self.control_render(id, dt, painter),
+        }
+    }
+
+    pub fn menu_on_visible_changed(&mut self, id: Id, visible: bool) {
+        match &self.controls[id].kind {
+            Kind::Menu(menu) => match &**menu {
+                Menu::Pause(_) => self.pause_menu_on_visible_changed(id, visible),
+                Menu::Leaderboard(_) => self.leaderboard_on_visible_changed(id, visible),
+                Menu::Esc(_) => self.esc_menu_on_visible_changed(id, visible),
+                Menu::Replay(_) => self.replay_on_visible_changed(id),
+                Menu::SetupTab(_) => self.setup_tab_on_visible_changed(id, visible),
+                Menu::TimeTable(_) => self.time_table_on_visible_changed(id, visible),
+                _ => self.control_on_visible_changed(id, visible),
+            },
+            _ => self.control_on_visible_changed(id, visible),
+        }
+    }
+
+    pub fn menu_on_mouse_down(&mut self, id: Id, e: &crate::control::MouseEvent) -> bool {
+        match &self.controls[id].kind {
+            Kind::Menu(menu) => match &**menu {
+                Menu::Leaderboard(_) => self.leaderboard_on_mouse_down(id, e),
+                _ => self.control_on_mouse_down(id, e),
+            },
+            _ => self.control_on_mouse_down(id, e),
+        }
+    }
+
+    pub fn menu_on_mouse_move(&mut self, id: Id, e: &crate::control::MouseEvent) {
+        match &self.controls[id].kind {
+            Kind::Menu(menu) => match &**menu {
+                Menu::Replay(_) => self.replay_on_mouse_move(id, e),
+                _ => self.control_on_mouse_move(id, e),
+            },
+            _ => self.control_on_mouse_move(id, e),
+        }
+    }
+}

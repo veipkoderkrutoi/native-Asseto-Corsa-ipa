@@ -1,0 +1,1873 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from Assetto Corsa (acs.exe, Kunos Simulazioni).
+
+//! What the debug view draws and from where: the car's shape as boxes, AC's chase and
+//! cockpit cameras, and the little matrix arithmetic the picture needs. No Direct3D in here.
+
+use std::path::{Path, PathBuf};
+
+use rustyac_physics::session::MsvcRand;
+use rustyac_physics::vecmath::{xm_matrix_multiply, Mat44f, Vec3f};
+
+use crate::input::ini::ControlsIni;
+use crate::view::{CarView, Mat, IDENTITY};
+
+pub fn mul(a: &Mat, b: &Mat) -> Mat {
+    xm_matrix_multiply(&Mat44f { m: *a }, &Mat44f { m: *b }).m
+}
+
+pub fn scale_then(sx: f32, sy: f32, sz: f32, m: &Mat) -> Mat {
+    let mut s = IDENTITY;
+    s[0][0] = sx;
+    s[1][1] = sy;
+    s[2][2] = sz;
+    mul(&s, m)
+}
+
+pub fn translation(x: f32, y: f32, z: f32) -> Mat {
+    let mut m = IDENTITY;
+    m[3] = [x, y, z, 1.0];
+    m
+}
+
+fn row(m: &Mat, k: usize) -> [f32; 3] {
+    [m[k][0], m[k][1], m[k][2]]
+}
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn times(a: [f32; 3], k: f32) -> [f32; 3] {
+    [a[0] * k, a[1] * k, a[2] * k]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn normalized(v: [f32; 3]) -> [f32; 3] {
+    let length = dot(v, v).sqrt();
+    if length != 0.0 {
+        times(v, 1.0 / length)
+    } else {
+        v
+    }
+}
+
+/// A point given in a part's own axes, in the world.
+pub fn point(m: &Mat, p: [f32; 3]) -> [f32; 3] {
+    add(add(add(times(row(m, 0), p[0]), times(row(m, 1), p[1])), times(row(m, 2), p[2])), row(m, 3))
+}
+
+/// `mat44f::setFromHeadingUp` @ 0x1400602f0: row 1 = heading x up, row 2 = up, row 3 = minus
+/// the heading (a camera looks along its own -z).
+pub fn set_from_heading_up(heading: [f32; 3], up: [f32; 3], position: [f32; 3]) -> Mat {
+    let s = normalized(cross(heading, up));
+    [
+        [s[0], s[1], s[2], 0.0],
+        [up[0], up[1], up[2], 0.0],
+        [-heading[0], -heading[1], -heading[2], 0.0],
+        [position[0], position[1], position[2], 1.0],
+    ]
+}
+
+/// `mat44f::createTarget` @ 0x14005ff50: a camera at `position` aimed at `target` that never
+/// rolls (its up is the world's, made square to the view).
+pub fn create_target(position: [f32; 3], target: [f32; 3]) -> Mat {
+    let f = normalized(sub(target, position));
+    let a = normalized([-f[2], 0.0, f[0]]);
+    let mut u = normalized(cross(f, a));
+    if u[1] < 0.0 {
+        u = times(u, -1.0);
+    }
+    set_from_heading_up(f, u, position)
+}
+
+/// `mat44f::createTarget` @ 0x14005ff50 and `setFromHeadingUp` @ 0x1400602f0 as the machine
+/// adds them up, bit for bit (Task 34's start camera; [`create_target`] is the older one the
+/// debug view's chase camera has).
+pub fn create_target_exact(position: [f32; 3], target: [f32; 3]) -> Mat {
+    let unit = |v: [f32; 3], length: f32| if length != 0.0 { times(v, 1.0 / length) } else { v };
+    let mut f = sub(target, position);
+    f = unit(f, ((f[0] * f[0] + f[1] * f[1]) + f[2] * f[2]).sqrt());
+    // the heading across the world's up (0, 1, 0)
+    let a = [f[1] * 0.0 - f[2], f[2] * 0.0 - f[0] * 0.0, f[0] - f[1] * 0.0];
+    let a = unit(a, ((a[1] * a[1] + a[0] * a[0]) + a[2] * a[2]).sqrt());
+    let v = [a[2] * f[1] - f[2] * a[1], a[0] * f[2] - a[2] * f[0], f[0] * a[1] - a[0] * f[1]];
+    let mut u = unit(v, ((v[1] * v[1] + v[0] * v[0]) + v[2] * v[2]).sqrt());
+    // (`comiss`/`jae`: a NaN is turned too)
+    if u[1] < 0.0 || u[1].is_nan() {
+        u = times(u, -1.0);
+    }
+    let s = [u[2] * f[1] - u[1] * f[2], u[0] * f[2] - f[0] * u[2], f[0] * u[1] - u[0] * f[1]];
+    let s = unit(s, ((s[1] * s[1] + s[0] * s[0]) + s[2] * s[2]).sqrt());
+    [
+        [s[0], s[1], s[2], 0.0],
+        [u[0], u[1], u[2], 0.0],
+        [-f[0], -f[1], -f[2], 0.0],
+        [position[0], position[1], position[2], 1.0],
+    ]
+}
+
+/// rustyAC's own camera of `--free-camera` (not one of AC's): it stands `eye` metres to the
+/// right of, above and ahead of the body's origin and looks at the point `look`, both on axes
+/// that stay level (the body's heading laid on the ground, the world's up).
+pub fn free_camera(body: &Mat, eye: [f32; 3], look: [f32; 3]) -> Mat {
+    let heading = row(body, 2);
+    let mut ahead = normalized([heading[0], 0.0, heading[2]]);
+    if !ahead.iter().all(|n| n.is_finite()) || dot(ahead, ahead) < 0.5 {
+        // a car standing on its nose has no heading on the ground
+        ahead = [0.0, 0.0, 1.0];
+    }
+    let up = [0.0, 1.0, 0.0];
+    // the car's +x is its left
+    let right = cross(ahead, up);
+    let origin = row(body, 3);
+    let place = |p: [f32; 3]| add(add(add(times(right, p[0]), times(up, p[1])), times(ahead, p[2])), origin);
+    create_target(place(eye), place(look))
+}
+
+/// `Camera::rotatePitch` @ 0x14020fa80: a turn about the camera's own x axis (positive = up).
+pub fn rotate_pitch(camera: &Mat, angle: f32) -> Mat {
+    let turn = Mat44f::create_from_axis_angle(&Vec3f::new(1.0, 0.0, 0.0), angle);
+    xm_matrix_multiply(&turn, &Mat44f { m: *camera }).m
+}
+
+/// The view matrix of a camera matrix: its rigid inverse.
+pub fn view_matrix(camera: &Mat) -> Mat {
+    let (x, y, z, p) = (row(camera, 0), row(camera, 1), row(camera, 2), row(camera, 3));
+    [
+        [x[0], y[0], z[0], 0.0],
+        [x[1], y[1], z[1], 0.0],
+        [x[2], y[2], z[2], 0.0],
+        [-dot(p, x), -dot(p, y), -dot(p, z), 1.0],
+    ]
+}
+
+/// `Camera::getPerspectiveMatrix` @ 0x14020ef00: the right-handed projection, vertical field
+/// of view in degrees, depth 0..1.
+pub fn perspective(fov_degrees: f32, aspect: f32, near: f32, far: f32) -> Mat {
+    let f = 1.0 / ((fov_degrees * 0.017_453) * 0.5).tan();
+    let q = 1.0 / (near - far);
+    [[f / aspect, 0.0, 0.0, 0.0], [0.0, f, 0.0, 0.0], [0.0, 0.0, q * far, -1.0], [0.0, 0.0, (near * far) * q, 0.0]]
+}
+
+/// [`perspective`] with the depth turned round: 1 at `near`, 0 at `far`. Not the game's (its
+/// depth runs 0..1): a float depth buffer is far finer this way round, which is what keeps a
+/// sign painted a few millimetres in front of a wall from flickering at a distance.
+pub fn perspective_reversed(fov_degrees: f32, aspect: f32, near: f32, far: f32) -> Mat {
+    let f = 1.0 / ((fov_degrees * 0.017_453) * 0.5).tan();
+    let q = 1.0 / (far - near);
+    [[f / aspect, 0.0, 0.0, 0.0], [0.0, f, 0.0, 0.0], [0.0, 0.0, q * near, -1.0], [0.0, 0.0, (near * far) * q, 0.0]]
+}
+
+/// `a` x `b` worked out in double precision: a model's world matrix times the camera's view
+/// matrix. On a track both hold coordinates of a kilometre and their product a few metres;
+/// in single precision the picture's depth would wobble by millimetres.
+pub fn mul_precise(a: &Mat, b: &Mat) -> Mat {
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = (0..4).map(|k| a[i][k] as f64 * b[k][j] as f64).sum::<f64>() as f32;
+        }
+    }
+    out
+}
+
+/// A box of the car in body axes: centre and full edge lengths.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShape {
+    pub centre: [f32; 3],
+    pub size: [f32; 3],
+    pub color: [f32; 3],
+}
+
+/// What is drawn of a car besides its wheels, and where its driver's eyes are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarShape {
+    pub boxes: Vec<BoxShape>,
+    /// The driver's eye point in body axes (from the centre of mass), and the pitch of the
+    /// cockpit view, radians.
+    pub eye: [f32; 3],
+    pub eye_pitch: f32,
+    /// The eye point as AC keeps it (`CarAvatar::driverEyesPosition`: car.ini `DRIVEREYES`,
+    /// in the 3D model's frame); `eye` is it in body axes.
+    pub eye_model: [f32; 3],
+    /// The cockpit view's vertical field of view, degrees.
+    pub onboard_fov: f32,
+    /// `car.ini [BASIC] GRAPHICS_PITCH_ROTATION`, radians: the 3D model's pitch against the
+    /// physics body. AC's cameras ride on the model.
+    pub graphics_pitch: f32,
+    /// `car.ini [BASIC] GRAPHICS_OFFSET`: where the 3D model's origin is in body axes.
+    pub graphics_offset: [f32; 3],
+    /// `car.ini [GRAPHICS] BONNET_CAMERA_POS` / `BUMPER_CAMERA_POS` (body axes from the centre
+    /// of mass) and `BONNET_CAMERA_PITCH` / `BUMPER_CAMERA_PITCH` (radians; 0 without the key).
+    pub bonnet_pos: [f32; 3],
+    pub bonnet_pitch: f32,
+    pub bumper_pos: [f32; 3],
+    pub bumper_pitch: f32,
+    /// `dash_cam.ini [DASH_CAM] POS`, in the 3D model's frame (its origin without the file).
+    pub dash_pos: [f32; 3],
+    /// The cameras of `cameras.ini` (F6).
+    pub car_cameras: Vec<CarCamera>,
+    /// Where the look-back key puts the cockpit camera and the bonnet, bumper and dash views
+    /// (`lookBackPoints`, in the 3D model's frame), and the yaw of those three views.
+    pub look_back: [f32; 3],
+    pub drivable_look_back: [f32; 3],
+    pub drivable_yaw: f32,
+    /// `car.ini [GRAPHICS] SHAKE_MUL` (0: 1); the game keeps the last car's for every car.
+    pub shake_mul: f32,
+}
+
+pub(crate) fn three(text: &str) -> Option<[f32; 3]> {
+    let mut parts = text.split(',').map(|part| part.trim().parse::<f32>());
+    let out = [parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?];
+    Some(out)
+}
+
+impl CarShape {
+    /// A car nobody has data for: a plain body.
+    pub fn plain() -> CarShape {
+        CarShape {
+            boxes: vec![BoxShape { centre: [0.0, 0.15, 0.1], size: [1.4, 0.5, 4.2], color: [0.75, 0.08, 0.06] }],
+            eye: [0.0, 0.6, 0.0],
+            eye_pitch: 0.0,
+            eye_model: [0.0, 0.6, 0.0],
+            onboard_fov: 54.0,
+            graphics_pitch: 0.0,
+            graphics_offset: [0.0; 3],
+            bonnet_pos: [0.0, 0.9, 0.0],
+            bonnet_pitch: 0.0,
+            bumper_pos: [0.0, 0.5, 2.0],
+            bumper_pitch: 0.0,
+            dash_pos: [0.0, 0.6, 0.3],
+            car_cameras: Vec::new(),
+            look_back: [0.0, 0.6, 0.0],
+            drivable_look_back: [0.0, 0.6, 0.0],
+            drivable_yaw: 0.0,
+            shake_mul: 1.0,
+        }
+    }
+
+    /// The shape of a car the simulation has built, with the cockpit view's field of view
+    /// from AC's own `camera_onboard.ini` (read only) where that file exists.
+    pub fn of(info: &crate::sim::CarInfo) -> CarShape {
+        let mut shape = CarShape::load(&info.data_path, &info.wheel_positions, &info.tyre_width, &info.tyre_radius);
+        shape.read_documents_fov();
+        shape
+    }
+
+    /// The field of view of the player's `cfg/camera_onboard.ini` in AC's Documents (through
+    /// the content reader: the page reads its own), where that file has one.
+    pub fn read_documents_fov(&mut self) {
+        if let Some(documents) = rustyac_content::install::documents() {
+            let path = documents.join("cfg").join("camera_onboard.ini");
+            if let Ok(ini) = ControlsIni::load_car_data(&path) {
+                // `CameraOnBoard::CameraOnBoard`: a field of view of 0 means the default
+                let fov = ini.get_float("MODE", "FOV");
+                if fov > 0.0 && fov < 170.0 {
+                    self.onboard_fov = fov;
+                }
+            }
+        }
+    }
+
+    /// The eye point in the 3D model's frame (`driverEyesPosition`), and so in body axes.
+    pub fn set_eye_model(&mut self, q: [f32; 3]) {
+        let (offset, pitch) = (self.graphics_offset, self.graphics_pitch);
+        let (s, c) = pitch.sin_cos();
+        self.eye_model = q;
+        self.eye = [q[0] + offset[0], q[1] * c - q[2] * s + offset[1], q[1] * s + q[2] * c + offset[2]];
+    }
+
+    /// The car's own files as the apps left them in rustyAC's `cfg` (Onboard settings' "Save
+    /// car.ini" and "Save Dash", the force feedback app's car.ini): `content/cars/<car>/data/
+    /// car.ini [GRAPHICS] DRIVEREYES, ON_BOARD_PITCH_ANGLE` and `dash_cam.ini [DASH_CAM] POS`
+    /// in place of the car's, as the game reads the loose files the apps wrote over.
+    pub fn apply_saved_car_files(&mut self, cfg_dir: &Path, unix_name: &str) {
+        let data = cfg_dir.join("content/cars").join(unix_name).join("data");
+        if let Ok(ini) = ControlsIni::load(&data.join("car.ini")) {
+            if let Some(q) = three(ini.get_string("GRAPHICS", "DRIVEREYES")) {
+                self.set_eye_model(q);
+            }
+            if ini.has_key("GRAPHICS", "ON_BOARD_PITCH_ANGLE") {
+                self.eye_pitch = ini.get_float("GRAPHICS", "ON_BOARD_PITCH_ANGLE") * 0.017_453;
+            }
+        }
+        if let Ok(ini) = ControlsIni::load(&data.join("dash_cam.ini")) {
+            self.dash_pos = three(ini.get_string("DASH_CAM", "POS")).unwrap_or([0.0; 3]);
+        }
+    }
+
+    /// What the Onboard settings app saved in rustyAC's own `cfg`: `cars/<car>/view.ini` of the
+    /// car itself for its eye point (`CarAvatar::init3D`), `cars/<first car>/view.ini` for its
+    /// pitch in radians (`CameraOnBoard::CameraOnBoard` 0x1400c84e0 reads the file of car 0's
+    /// name for every car), and `camera_onboard.ini [MODE] FOV` (0: 54) before the other files.
+    pub fn apply_own_onboard(&mut self, cfg_dir: &Path, unix_name: &str, first_car: &str) {
+        if let Ok(ini) = ControlsIni::load(&cfg_dir.join("cars").join(unix_name).join("view.ini")) {
+            if let Some(q) = three(ini.get_string("DRIVER_EYES_POSITION", "DRIVEREYES")) {
+                self.set_eye_model(q);
+            }
+        }
+        if let Ok(ini) = ControlsIni::load(&cfg_dir.join("cars").join(first_car).join("view.ini")) {
+            if ini.has_key("CAMERA", "ON_BOARD_PITCH_ANGLE") {
+                self.eye_pitch = ini.get_float("CAMERA", "ON_BOARD_PITCH_ANGLE");
+            }
+        }
+        if let Ok(ini) = ControlsIni::load(&cfg_dir.join("camera_onboard.ini")) {
+            let fov = ini.get_float("MODE", "FOV");
+            self.onboard_fov = if fov == 0.0 { 54.0 } else { fov };
+        }
+    }
+
+    /// The shape from a car's data folder: the collision boxes of `colliders.ini` (what the
+    /// physics car is to walls), a body box between the wheels, and the eye point of
+    /// `car.ini`.
+    pub fn load(data_path: &Path, wheel_positions: &[[f32; 3]; 4], tyre_width: &[f32; 4], tyre_radius: &[f32; 4]) -> CarShape {
+        let mut shape = CarShape::plain();
+        shape.boxes.clear();
+        let red = [0.78, 0.07, 0.05];
+        let dark = [0.16, 0.16, 0.18];
+        // the tub between the wheels: from behind the rear axle to ahead of the front axle
+        let front_z = wheel_positions[0][2];
+        let rear_z = wheel_positions[2][2];
+        let inner = |k: usize| wheel_positions[k][0].abs() - tyre_width[k] * 0.5;
+        let half_width = (inner(0).min(inner(2)) - 0.08).clamp(0.25, 1.0);
+        let floor = wheel_positions[0][1].min(wheel_positions[2][1]) - tyre_radius[0] * 0.55;
+        let top = floor + 0.42;
+        shape.boxes.push(BoxShape {
+            centre: [0.0, (floor + top) * 0.5, (front_z + rear_z) * 0.5 + 0.1],
+            size: [half_width * 2.0, top - floor, (front_z - rear_z) + tyre_radius[0] * 1.2],
+            color: red,
+        });
+        if let Ok(ini) = ControlsIni::load_car_data(&data_path.join("colliders.ini")) {
+            for index in 0..32 {
+                let section = format!("COLLIDER_{index}");
+                if !ini.has_section(&section) {
+                    break;
+                }
+                if let (Some(centre), Some(size)) = (three(ini.get_string(&section, "CENTRE")), three(ini.get_string(&section, "SIZE"))) {
+                    // the thin floor plates are dark, the rest (airbox, wings) body colour
+                    let color = if size[1] < 0.1 { dark } else { red };
+                    shape.boxes.push(BoxShape { centre, size, color });
+                }
+            }
+        }
+        if let Ok(ini) = ControlsIni::load_car_data(&data_path.join("car.ini")) {
+            // `CarAvatar::makeBodyMatrix`: a point of the 3D model is at q . Rx(pitch) + offset
+            let offset = three(ini.get_string("BASIC", "GRAPHICS_OFFSET")).unwrap_or([0.0; 3]);
+            let pitch = ini.get_float("BASIC", "GRAPHICS_PITCH_ROTATION") * 0.017_453;
+            shape.graphics_pitch = pitch;
+            shape.graphics_offset = offset;
+            if let Some(q) = three(ini.get_string("GRAPHICS", "DRIVEREYES")) {
+                shape.set_eye_model(q);
+            }
+            shape.eye_pitch = ini.get_float("GRAPHICS", "ON_BOARD_PITCH_ANGLE") * 0.017_453;
+            // `CameraDrivableManager::CameraDrivableManager` @ 0x1400c4a80: a missing position
+            // is the centre of mass, a missing pitch 0
+            shape.bonnet_pos = three(ini.get_string("GRAPHICS", "BONNET_CAMERA_POS")).unwrap_or([0.0; 3]);
+            shape.bumper_pos = three(ini.get_string("GRAPHICS", "BUMPER_CAMERA_POS")).unwrap_or([0.0; 3]);
+            shape.bonnet_pitch = ini.get_float("GRAPHICS", "BONNET_CAMERA_PITCH") * 0.017_453;
+            shape.bumper_pitch = ini.get_float("GRAPHICS", "BUMPER_CAMERA_PITCH") * 0.017_453;
+            shape.dash_pos = [0.0; 3];
+            let mul = ini.get_float("GRAPHICS", "SHAKE_MUL");
+            shape.shake_mul = if mul == 0.0 { 1.0 } else { mul };
+            // the look-back points (`CameraOnBoard` and `CameraDrivableManager` ctors): behind
+            // the middle of the top of the collider's box (`modelBoundaries`), moved by the
+            // car's offsets
+            let offset = |key| if ini.has_key("GRAPHICS", key) { three(ini.get_string("GRAPHICS", key)).unwrap_or([0.0; 3]) } else { [0.0; 3] };
+            let b = collider_boundaries(data_path);
+            let point = |o: [f32; 3]| [(b[3] + b[2]) * 0.5 + o[0], o[1] + b[4], o[2] + b[1]];
+            shape.look_back = point(offset("ON_BOARD_LOOKBACK_OFFSET"));
+            shape.drivable_look_back = point(offset("DRIVABLE_LOOKBACK_OFFSET"));
+        }
+        if let Ok(ini) = ControlsIni::load_car_data(&data_path.join("dash_cam.ini")) {
+            shape.dash_pos = three(ini.get_string("DASH_CAM", "POS")).unwrap_or([0.0; 3]);
+        }
+        if let Ok(ini) = ControlsIni::load_car_data(&data_path.join("cameras.ini")) {
+            shape.car_cameras = load_car_cameras(&ini);
+        }
+        // the driver's helmet, so the cockpit is somewhere to be seen from outside
+        shape.boxes.push(BoxShape { centre: [shape.eye[0], shape.eye[1] - 0.02, shape.eye[2] - 0.18], size: [0.24, 0.26, 0.28], color: [0.9, 0.8, 0.1] });
+        shape
+    }
+}
+
+/// `CarAvatar::modelBoundaries` of the car whose data folder this is (its `collider.kn5`
+/// beside it, else in the game's folder; none: all 0).
+fn collider_boundaries(data_path: &Path) -> [f32; 6] {
+    let folder = data_path.parent().unwrap_or(data_path);
+    let mut files = vec![folder.join("collider.kn5")];
+    if let (Some(root), Some(name)) = (rustyac_content::install::ac_root(), folder.file_name()) {
+        files.push(root.join("content/cars").join(name).join("collider.kn5"));
+    }
+    files.iter().find(|f| f.is_file()).and_then(|f| rustyac_physics::car::colliders::model_boundaries(f).ok()).unwrap_or([0.0; 6])
+}
+
+/// The whole matrix of a car's 3D model (`CarAvatar::bodyMatrix`): its origin is the centre of
+/// mass moved by `GRAPHICS_OFFSET`, pitched by `GRAPHICS_PITCH`.
+pub fn model_matrix(body: &Mat, shape: &CarShape) -> Mat {
+    let mut moved = *body;
+    let origin = point(body, shape.graphics_offset);
+    moved[3] = [origin[0], origin[1], origin[2], body[3][3]];
+    if shape.graphics_pitch == 0.0 {
+        return moved;
+    }
+    rotate_pitch(&moved, shape.graphics_pitch)
+}
+
+/// AC's camera modes, as far as a car is driven with them (`ACCameraManager::mode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraMode {
+    /// `eCockpit`: the driver's eyes.
+    Cockpit,
+    /// `eDrivable`: one of the five views of [`Drivable`].
+    Drivable,
+    /// `eCar`: one of the cameras of the car's own `cameras.ini` (F6).
+    Car,
+    /// `eTrack`: the track's TV cameras (F3), drawn by
+    /// [`TrackCameras`](super::track_camera::TrackCameras).
+    Track,
+}
+
+/// The views of AC's `CameraDrivableManager` (`currentMode`), in its order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drivable {
+    /// 3.0 m behind and 1.4 m above the rear axle.
+    Chase,
+    /// 3.9 m behind, 1.9 m above.
+    Chase2,
+    /// `car.ini [GRAPHICS] BONNET_CAMERA_POS`
+    Bonnet,
+    /// `BUMPER_CAMERA_POS`
+    Bumper,
+    /// `dash_cam.ini [DASH_CAM] POS`
+    Dash,
+}
+
+impl Drivable {
+    const ALL: [Drivable; 5] = [Drivable::Chase, Drivable::Chase2, Drivable::Bonnet, Drivable::Bumper, Drivable::Dash];
+
+    fn name(self) -> &'static str {
+        match self {
+            Drivable::Chase => "chase",
+            Drivable::Chase2 => "chase 2",
+            Drivable::Bonnet => "bonnet",
+            Drivable::Bumper => "bumper",
+            Drivable::Dash => "dash",
+        }
+    }
+}
+
+/// A camera for one frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraFrame {
+    /// The camera's world matrix (row 3 = minus the view direction, row 4 = position).
+    pub matrix: Mat,
+    pub fov: f32,
+    pub near: f32,
+}
+
+/// `CameraOnBoard` (ctor 0x1400c84e0): the cockpit camera's settings (`camera_onboard.ini`)
+/// and what it remembers from frame to frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CockpitCamera {
+    /// `gForceMix`, `gForceLagMix`: how far the head moves with the g forces, and its lag.
+    pub g_force_mix: [f32; 3],
+    pub g_force_lag_mix: f32,
+    /// `headRotationDegrees`, `headRotationSpeed`: the look keys' turn.
+    pub head_rotation_degrees: f32,
+    pub head_rotation_speed: f32,
+    /// `shakeMul` (of the g-force offset), `shakeFreq`, `shakeScale`, `stillCamera`.
+    pub shake_mul: f32,
+    pub shake_freq: [f32; 3],
+    pub shake_scale: [f32; 3],
+    pub still_camera: bool,
+    /// `SignalGenerator3D::randomBlend`: how much `rand()` scatters the shake's time steps.
+    pub random_blend: f32,
+    /// `IS_WORLD_ALIGNED`: the view stays level.
+    pub world_aligned: bool,
+    /// `customCameraSettings[car].yaw` (the pitch is [`CarShape::eye_pitch`]).
+    pub yaw: f32,
+    g_force_offset: [f32; 3],
+    /// The head's turn now (`headRotationAnimation`), 0 looking ahead.
+    pub head_animation: f32,
+    /// the shake's three `SinSignalGenerator`s: their times (ms) and frequencies
+    shake: [i32; 3],
+    shake_freq_now: [f32; 3],
+    /// the C library's `rand()` (the game's is the process's one)
+    pub rand: MsvcRand,
+}
+
+impl CockpitCamera {
+    /// `CameraOnBoard::CameraOnBoard`'s own values, before the files.
+    pub fn game() -> CockpitCamera {
+        CockpitCamera {
+            g_force_mix: [-0.002, -0.002, -0.0025],
+            g_force_lag_mix: 0.8,
+            head_rotation_degrees: 60.0,
+            head_rotation_speed: 5.0,
+            shake_mul: 1.0,
+            shake_freq: [100.05; 3],
+            shake_scale: [0.001, 0.0002, 0.00015],
+            random_blend: 0.5,
+            world_aligned: true,
+            ..CockpitCamera::default()
+        }
+    }
+}
+
+impl Default for CockpitCamera {
+    fn default() -> CockpitCamera {
+        CockpitCamera {
+            g_force_mix: [0.0; 3],
+            g_force_lag_mix: 0.0,
+            head_rotation_degrees: 60.0,
+            head_rotation_speed: 1.0,
+            shake_mul: 0.0,
+            shake_freq: [0.0; 3],
+            shake_scale: [0.0; 3],
+            still_camera: false,
+            random_blend: 0.0,
+            world_aligned: false,
+            yaw: 0.0,
+            g_force_offset: [0.0; 3],
+            head_animation: 0.0,
+            // `SignalGenerator3D`'s ctor steps the first two by 0.5 s and 1.5 s
+            shake: [500, 1500, 0],
+            shake_freq_now: [1.0; 3],
+            rand: MsvcRand(1),
+        }
+    }
+}
+
+/// AC's cameras for the driven car, as far as a debug view wants them (no glance, no head
+/// shake, no fades): the cockpit (`CameraOnBoard::update` @ 0x1400c9ea0), the five drivable
+/// views (`CameraDrivableManager::update` @ 0x1400c6a30) and the car's own cameras
+/// (`CameraCarManager::update` @ 0x1400c47d0), with the game's two keys
+/// (`ACCameraManager::setMode` @ 0x1400340d0, `Sim::onKeyDown` @ 0x14019a940).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrivingCamera {
+    pub mode: CameraMode,
+    /// `CameraDrivableManager::currentMode`: kept while another mode is shown.
+    pub drivable: Drivable,
+    /// `ACCameraManager::lastDrivingMode`: what F1 comes back to from a car camera.
+    last_driving: CameraMode,
+    /// `CameraCarManager::currentCameraIndex`: kept too.
+    pub car_index: usize,
+    /// `ACCameraManager::persistanceCameraMode`: the last camera driven with (0 the cockpit, 2
+    /// the drivable views) and the drivable view, `camera_manager.ini [LAST_CAMERA] MODE` and
+    /// `DRIVABLE_MODE`.
+    pub last_camera: (i32, i32),
+    /// `ACCameraManager::fadeColor`: `camera_manager.ini [FADE] COLOR`, black without it
+    pub fade_color: [f32; 3],
+    /// The chase camera's place relative to the rear axle, lagging behind the g forces.
+    current_offset: [f32; 3],
+    /// `actionsState` of the focused car: bit 0 look left, bit 1 look right, bit 9 look back.
+    pub actions: u32,
+    /// Task 47b: `Sim::isVrConnected`
+    pub vr: bool,
+    /// system/cfg/assetto_corsa.ini `[VR] ENABLE_CAMERA_SHAKE`
+    pub vr_camera_shake: bool,
+    /// The head tracker's turn (degrees: pitch, heading, roll) and move (metres) this frame
+    /// (`TrackIR::getOffsets`), `None` without one: the cockpit view then has its look keys.
+    pub head: Option<([f32; 3], [f32; 3])>,
+    /// The camera's near plane as the last mode left it (a car camera keeps it).
+    pub near: f32,
+    /// `CameraOnBoard`: the cockpit's settings and what it remembers.
+    pub cockpit: CockpitCamera,
+    /// `CameraDrivableManager`: `accGXMul`, `accGZMul`, `chaseCamFilter`, `rotationDegrees`,
+    /// `rotationSpeed` (the look keys), and the turns the look keys have made.
+    pub acc_gx_mul: f32,
+    pub acc_gz_mul: f32,
+    pub chase_filter: f32,
+    pub rotation_degrees: f32,
+    pub rotation_speed: f32,
+    rotation_animation: f32,
+    rotation_chase: f32,
+    /// `CameraDrivableManager::chaseCamData`: distance, height, pitch (radians) of the two chase
+    /// cameras (the ChaseCam Editor changes the first one live)
+    pub chase: [(f32, f32, f32); 2],
+    /// `CameraTrack::currentSet`, as the track's cameras left it (for `currentGlobalCameraIndex`)
+    pub track_set: usize,
+    /// `ACCameraManager::randomMode`: F2's random camera picks the cameras
+    /// ([`RandomCamera`](super::track_camera::RandomCamera)); a key that sets a mode ends it.
+    pub random: bool,
+    /// `ACCameraManager::mode` while a camera of
+    /// [`onboard_free`](super::onboard_free) shows: 4 the helicopter, 5 F5's onboard free
+    pub shown: Option<i32>,
+    /// `getCameraTrackCount`: the track's camera sets (F5's `currentGlobalCameraIndex`)
+    pub track_sets: usize,
+}
+
+/// `system/cfg/chase_cam.ini` as shipped: distance, height, pitch (radians) of the two chase cameras.
+const CHASE: [(f32, f32, f32); 2] = [(3.0, 1.4, 0.034_906), (3.9, 1.9, -0.017_453)];
+
+impl DrivingCamera {
+    /// The first chase view.
+    pub fn chase() -> DrivingCamera {
+        DrivingCamera {
+            mode: CameraMode::Drivable,
+            drivable: Drivable::Chase,
+            last_driving: CameraMode::Drivable,
+            car_index: 0,
+            last_camera: (0, 0),
+            fade_color: [0.0; 3],
+            current_offset: [0.0; 3],
+            actions: 0,
+            vr: false,
+            vr_camera_shake: false,
+            head: None,
+            near: 0.05,
+            cockpit: CockpitCamera::default(),
+            acc_gx_mul: 0.4,
+            acc_gz_mul: -0.2,
+            chase_filter: 3.0,
+            rotation_degrees: 60.0,
+            rotation_speed: 1.0,
+            rotation_animation: 0.0,
+            rotation_chase: 0.0,
+            chase: CHASE,
+            track_set: 0,
+            random: false,
+            shown: None,
+            track_sets: 0,
+        }
+    }
+
+    /// `CameraDrivableManager::initChaseCamFromINI` 0x1400c61c0: `CHASE_0` / `CHASE_1`'s
+    /// `DISTANCE`, `HEIGHT`, `PITCH` (a missing file or key: 0, as in the game).
+    pub fn read_chase_ini(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let ini = rustyac_physics::data::ini::IniReader::load(path)?;
+        for (i, section) in ["CHASE_0", "CHASE_1"].iter().enumerate() {
+            self.chase[i] = (ini.get_float(section, "DISTANCE")?, ini.get_float(section, "HEIGHT")?, ini.get_float(section, "PITCH")?);
+        }
+        Ok(())
+    }
+
+    /// The camera `--camera <name>` asks for: `cockpit`, `chase`, `chase2`, `bonnet`, `bumper`,
+    /// `dash`, or `car0`, `car1` ... (a camera of the car's `cameras.ini`).
+    pub fn from_name(name: &str, shape: &CarShape) -> Result<DrivingCamera, String> {
+        let mut camera = DrivingCamera::chase();
+        match name {
+            "cockpit" => {
+                camera.mode = CameraMode::Cockpit;
+                camera.last_driving = CameraMode::Cockpit;
+            }
+            "chase" => {}
+            "chase2" => camera.drivable = Drivable::Chase2,
+            "bonnet" => camera.drivable = Drivable::Bonnet,
+            "bumper" => camera.drivable = Drivable::Bumper,
+            "dash" => camera.drivable = Drivable::Dash,
+            "track" => camera.mode = CameraMode::Track,
+            _ => {
+                let index: usize = name.strip_prefix("car").and_then(|n| n.parse().ok()).ok_or_else(|| camera_name_error(name))?;
+                let count = shape.car_cameras.len();
+                if index >= count {
+                    return Err(if count == 0 {
+                        format!("--camera {name}: this car has no cameras.ini (no car cameras)")
+                    } else {
+                        format!("--camera {name}: this car has {count} car cameras: car0 to car{}", count - 1)
+                    });
+                }
+                camera.mode = CameraMode::Car;
+                camera.car_index = index;
+            }
+        }
+        Ok(camera)
+    }
+
+    /// F1 (and the pad's camera button, and C): `setMode(eCockpit, false, false)`. From the
+    /// cockpit to the drivable view last shown; from a drivable view to the next one, and
+    /// after the last (dash) to the cockpit; from a car camera back to the view driven with
+    /// before, without moving on.
+    pub fn f1(&mut self) {
+        // setMode leaving the random camera takes the mode before as eOnBoardFree: the view
+        // driven with before
+        let before = if std::mem::take(&mut self.random) { CameraMode::Car } else { self.mode };
+        self.mode = match before {
+            CameraMode::Cockpit => CameraMode::Drivable,
+            CameraMode::Drivable => {
+                // CameraDrivableManager::nextMode @ 0x1400c6790
+                let next = Drivable::ALL.iter().position(|d| *d == self.drivable).unwrap_or(0) + 1;
+                self.drivable = Drivable::ALL[next % Drivable::ALL.len()];
+                if next == Drivable::ALL.len() {
+                    CameraMode::Cockpit
+                } else {
+                    CameraMode::Drivable
+                }
+            }
+            CameraMode::Car | CameraMode::Track => self.last_driving,
+        };
+        self.last_driving = self.mode;
+        self.remember();
+    }
+
+    /// The end of `setMode` 0x1400340d0 (and of `loadPreviousSessionUserCamera`): the cockpit
+    /// (not the random camera's) and the drivable views are remembered for the next session.
+    pub fn remember(&mut self) {
+        let drivable = Drivable::ALL.iter().position(|d| *d == self.drivable).unwrap_or(0) as i32;
+        match (self.shown, self.mode) {
+            (None, CameraMode::Cockpit) if !self.random => self.last_camera = (0, drivable),
+            (None, CameraMode::Drivable) => self.last_camera = (2, drivable),
+            _ => {}
+        }
+    }
+
+    /// `loadPreviousSessionUserCamera` 0x1400337e0 (the first Drive): the drivable view and the
+    /// camera remembered. A mode that is not a driving camera's (4 the helicopter, 5 F5, 6 the
+    /// free camera) is the caller's: `Some(mode)`.
+    pub fn load_previous(&mut self) -> Option<i32> {
+        self.set_drivable(self.last_camera.1);
+        self.random = false;
+        self.shown = None;
+        match self.last_camera.0 {
+            0 => (self.mode, self.last_driving) = (CameraMode::Cockpit, CameraMode::Cockpit),
+            1 => (self.mode, self.near) = (CameraMode::Car, 0.05),
+            2 => (self.mode, self.last_driving) = (CameraMode::Drivable, CameraMode::Drivable),
+            3 => self.mode = CameraMode::Track,
+            mode @ 4..=6 => return Some(mode),
+            // (another number: ACCameraManager::update's default, the cockpit's camera)
+            _ => self.mode = CameraMode::Cockpit,
+        }
+        self.remember();
+        None
+    }
+
+    /// `ACCameraManager`'s destructor: `WritePrivateProfileStringW` of `[LAST_CAMERA] MODE` and
+    /// `DRIVABLE_MODE` on the file's text `old` (`None`: there is none).
+    pub fn last_camera_ini(&self, old: Option<&[u8]>) -> Vec<u8> {
+        let text = rustyac_gui::apps::write_profile_string(old, "LAST_CAMERA", "MODE", &self.last_camera.0.to_string());
+        rustyac_gui::apps::write_profile_string(Some(&text), "LAST_CAMERA", "DRIVABLE_MODE", &self.last_camera.1.to_string())
+    }
+
+    /// F3 (`setMode(eTrack)`): to the track's cameras; true when they show already (the caller
+    /// moves to the next set, `CameraTrack::nextSet`). The driving view is kept for F1.
+    pub fn f3(&mut self) -> bool {
+        // (from the random camera: the mode before counts as eOnBoardFree, no next set)
+        let already = !std::mem::take(&mut self.random) && self.mode == CameraMode::Track;
+        self.mode = CameraMode::Track;
+        already
+    }
+
+    /// `CameraDrivableManager::nextMode` 0x1400c6790: the next of the five views; true when it
+    /// went round to the first.
+    pub fn next_drivable(&mut self) -> bool {
+        let next = Drivable::ALL.iter().position(|d| *d == self.drivable).unwrap_or(0) + 1;
+        self.drivable = Drivable::ALL[next % Drivable::ALL.len()];
+        next == Drivable::ALL.len()
+    }
+
+    /// `ACCameraManager::lastDrivingMode`, what F1 comes back to.
+    pub fn last_driving(&self) -> CameraMode {
+        self.last_driving
+    }
+
+    pub fn set_last_driving(&mut self, mode: CameraMode) {
+        self.last_driving = mode;
+    }
+
+    /// `CameraDrivableManager::setCurrentCamera` 0x1400c6960: one of the five views (another
+    /// number is not taken).
+    pub fn set_drivable(&mut self, index: i32) {
+        if let Some(view) = usize::try_from(index).ok().and_then(|i| Drivable::ALL.get(i)) {
+            self.drivable = *view;
+        }
+    }
+
+    /// `ACCameraManager::setMode(mode, true, false)` as the replay's bar asks for it: 0 the
+    /// cockpit, 2 the views that drive with the car, 3 the track's cameras.
+    pub fn set_mode_kept(&mut self, mode: i32) {
+        self.random = false;
+        self.shown = None;
+        self.mode = match mode {
+            0 => CameraMode::Cockpit,
+            2 => CameraMode::Drivable,
+            3 => CameraMode::Track,
+            _ => return,
+        };
+        if self.mode != CameraMode::Track {
+            self.last_driving = self.mode;
+        }
+        self.remember();
+    }
+
+    /// `setMode(eCar)` then `CameraCarManager::setCurrentCamera(index)`, as `ac.setCameraCar`
+    /// asks (the index was checked against the car's cameras).
+    pub fn set_car_camera(&mut self, index: usize) {
+        self.random = false;
+        self.shown = None;
+        self.mode = CameraMode::Car;
+        // setMode(eCar): the scene camera's near plane
+        self.near = 0.05;
+        self.car_index = index;
+    }
+
+    /// `ACCameraManager::setDrivableCarIndex` 0x140033fd0 (the Camera editor's F1 buttons):
+    /// 0 the cockpit, 1.. the drivable views; the random camera stays as it is.
+    pub fn set_drivable_car_index(&mut self, index: i32) {
+        self.shown = None;
+        if index != 0 {
+            self.mode = CameraMode::Drivable;
+            self.set_drivable(index - 1);
+        } else {
+            self.mode = CameraMode::Cockpit;
+        }
+        self.last_driving = self.mode;
+        self.remember();
+    }
+
+    /// `FormCamera::selectCamera` 0x1402f8760 after its `setMode(mode, false, false)`:
+    /// `setDrivableCarIndex` (mode 0) or `setCameraCarIndex` (mode 1, only while the car's
+    /// cameras show, only an index the focused car has).
+    pub fn select_index(&mut self, mode: i32, index: i32, count: usize) {
+        match mode {
+            0 => self.set_drivable_car_index(index),
+            1 if self.mode == CameraMode::Car && (index as u32 as usize) < count => self.car_index = index as usize,
+            _ => {}
+        }
+    }
+
+    /// F1 (or F6) from the free camera or the start camera: `setMode(eCockpit)` from a mode
+    /// that is not a driving one is `lastDrivingMode`, without moving on.
+    pub fn back_to_driving(&mut self) {
+        self.shown = None;
+        self.mode = self.last_driving;
+        self.remember();
+    }
+
+    /// `ACCameraManager::currentGlobalCameraIndex` as `setMode` leaves it: 0 the cockpit, 1 to
+    /// 5 the views that drive with the car, 6 on the track's camera sets; a camera of the car's
+    /// own leaves it as it was.
+    pub fn global_index(&self) -> Option<i32> {
+        match self.shown {
+            Some(5) => return Some(6 + self.track_sets as i32),
+            Some(_) => return None,
+            None => {}
+        }
+        match self.mode {
+            CameraMode::Cockpit => Some(0),
+            CameraMode::Drivable => Some(1 + Drivable::ALL.iter().position(|d| *d == self.drivable).unwrap_or(0) as i32),
+            CameraMode::Car => None,
+            CameraMode::Track => Some(6 + self.track_set as i32),
+        }
+    }
+
+    /// `ACCameraManager::mode`: 0 cockpit, 1 car, 2 drivable, 3 track, or [`shown`](Self::shown)'s.
+    pub fn manager_mode(&self) -> i32 {
+        self.shown.unwrap_or(match self.mode {
+            CameraMode::Cockpit => 0,
+            CameraMode::Car => 1,
+            CameraMode::Drivable => 2,
+            CameraMode::Track => 3,
+        })
+    }
+
+    /// F6: to the car's cameras, at the one last shown; pressed again, to the next one
+    /// (`CameraCarManager::nextCamera` @ 0x1400c4710). `count`: how many the car has.
+    pub fn f6(&mut self, count: usize) {
+        // (the next car camera keeps the random camera on; setMode(eCar) ends it)
+        if self.mode != CameraMode::Car {
+            self.random = false;
+        }
+        if count == 0 {
+            return;
+        }
+        if self.mode == CameraMode::Car {
+            self.car_index = (self.car_index + 1) % count;
+        } else {
+            // setMode(eCar): the scene camera's near plane
+            self.mode = CameraMode::Car;
+            self.near = 0.05;
+            self.car_index = self.car_index.min(count - 1);
+        }
+    }
+
+    /// The view's name, for the display.
+    pub fn name(&self) -> String {
+        match self.shown {
+            Some(4) => return "helicopter".to_string(),
+            Some(5) => return "onboard free".to_string(),
+            Some(6) => return "cinematic".to_string(),
+            _ => {}
+        }
+        match self.mode {
+            CameraMode::Cockpit => "cockpit".to_string(),
+            CameraMode::Drivable => self.drivable.name().to_string(),
+            CameraMode::Car => format!("car {}", self.car_index),
+            CameraMode::Track => format!("track {}", self.track_set),
+        }
+    }
+
+    /// The cockpit or the dash view: the views `CameraOnBoard`'s field of view is for.
+    pub fn on_board(&self) -> bool {
+        self.mode == CameraMode::Cockpit || (self.mode == CameraMode::Drivable && self.drivable == Drivable::Dash)
+    }
+
+    /// The settings [`read_settings`](Self::read_settings) gave, on one line (the desktop
+    /// prints it, the page's HUD hook shows it: the two compare).
+    pub fn settings_line(&self) -> String {
+        let c = &self.cockpit;
+        format!(
+            "mix {:?} lag {:?} head {:?}/{:?} shake {:?} freq {:?} scale {:?} random {:?} aligned {} drivable g {:?}/{:?} rotation {:?}/{:?}",
+            c.g_force_mix, c.g_force_lag_mix, c.head_rotation_degrees, c.head_rotation_speed, c.shake_mul, c.shake_freq, c.shake_scale, c.random_blend, c.world_aligned, self.acc_gx_mul, self.acc_gz_mul, self.rotation_degrees, self.rotation_speed
+        )
+    }
+
+    /// [`read_settings`](Self::read_settings) from the files: the player's `camera_onboard.ini`
+    /// and `camera_manager.ini` from `own_cfg` (rustyAC's own cfg) else AC's Documents, the
+    /// game's `system/cfg/camera_drivable.ini` (rustyAC's own, else the install's). Through
+    /// the content reader, so the page reads its own files.
+    pub fn load_settings(&mut self, own_cfg: Option<&Path>, shake_mul: f32) {
+        let documents = rustyac_content::install::documents().map(|d| d.join("cfg"));
+        let root = rustyac_content::install::ac_root();
+        let first = |paths: [Option<PathBuf>; 2]| paths.into_iter().flatten().find_map(|p| ControlsIni::load_car_data(&p).ok());
+        let player = |name: &str| first([own_cfg.map(|c| c.join(name)), documents.as_ref().map(|d| d.join(name))]);
+        let drivable = first([own_cfg.map(|c| c.join("system/cfg/camera_drivable.ini")), root.map(|r| r.join("system/cfg/camera_drivable.ini"))]);
+        self.read_settings(player("camera_onboard.ini").as_ref(), player("camera_manager.ini").as_ref(), drivable.as_ref(), shake_mul);
+    }
+
+    /// The settings the game's `CameraOnBoard` (0x1400c84e0) and `CameraDrivableManager`
+    /// (0x1400c4a80) constructors read: the player's `cfg/camera_onboard.ini` and
+    /// `cfg/camera_manager.ini`, the game's `system/cfg/camera_drivable.ini` (a file that is not
+    /// there leaves the values before it), and the last car's `SHAKE_MUL`.
+    pub fn read_settings(&mut self, onboard: Option<&ControlsIni>, manager: Option<&ControlsIni>, drivable: Option<&ControlsIni>, shake_mul: f32) {
+        let mut c = CockpitCamera::game();
+        let (mut gx_mul, mut gz_mul, mut degrees, mut speed) = (0.4f32, -0.2f32, 60.0, 1.0);
+        if let Some(ini) = drivable {
+            degrees = ini.get_float("ROTATION", "MAX_DEGREES");
+            speed = ini.get_float("ROTATION", "SPEED");
+        }
+        if let Some(ini) = onboard {
+            c.g_force_lag_mix = ini.get_float("GFORCES", "LAG");
+            c.head_rotation_degrees = ini.get_float("ROTATION", "HEAD_MAX_DEGREES");
+            c.head_rotation_speed = ini.get_float("ROTATION", "SPEED");
+            c.shake_freq = three(ini.get_string("SHAKE", "FREQ")).unwrap_or([0.0; 3]);
+            c.random_blend = ini.get_float("SHAKE", "RANDOM");
+            c.world_aligned = ini.get_int("MODE", "IS_WORLD_ALIGNED") != 0;
+        }
+        if let Some(ini) = manager {
+            let g = [ini.get_float("SHAKE", "GFORCEX"), ini.get_float("SHAKE", "GFORCEY"), ini.get_float("SHAKE", "GFORCEZ")];
+            for (mix, g) in c.g_force_mix.iter_mut().zip(g) {
+                *mix *= g;
+            }
+            let k = ini.get_float("SHAKE", "SHAKEMULT");
+            for scale in &mut c.shake_scale {
+                *scale *= k;
+            }
+            gx_mul *= g[0];
+            gz_mul *= g[2];
+            // (ACCameraManager's ctor)
+            self.last_camera = (ini.get_int("LAST_CAMERA", "MODE"), ini.get_int("LAST_CAMERA", "DRIVABLE_MODE"));
+            if ini.has_section("FADE") {
+                self.fade_color = three(ini.get_string("FADE", "COLOR")).unwrap_or([0.0; 3]);
+            }
+        }
+        // (the drivable views take the cockpit file's head speed over their own)
+        if let Some(ini) = onboard {
+            speed = ini.get_float("ROTATION", "SPEED");
+        }
+        c.shake_mul = shake_mul;
+        c.rand = self.cockpit.rand;
+        self.cockpit = c;
+        (self.acc_gx_mul, self.acc_gz_mul, self.rotation_degrees, self.rotation_speed) = (gx_mul, gz_mul, degrees, speed);
+    }
+
+    /// The camera for a car as it is drawn now; `dt` is the time since the last frame (the
+    /// replay's time multiplier already in it), `acc_g` the car's acceleration in g (body axes).
+    pub fn update(&mut self, view: &CarView, shape: &CarShape, acc_g: [f32; 3], dt: f32) -> CameraFrame {
+        // `CarAvatar::bodyMatrix` (`makeBodyMatrix`): the car's 3D model, which the cameras use
+        let model = model_matrix(&view.body, shape);
+        if self.mode == CameraMode::Car && shape.car_cameras.is_empty() {
+            self.mode = self.last_driving;
+        }
+        let frame = match self.mode {
+            CameraMode::Cockpit => self.cockpit(view, shape, &model, acc_g, dt),
+            CameraMode::Car => {
+                // CameraCarManager::update: the camera's own matrix in the frame of the model,
+                // with its own field of view; the near plane is the last mode's
+                if self.car_index >= shape.car_cameras.len() {
+                    self.car_index = 0;
+                }
+                let camera = &shape.car_cameras[self.car_index];
+                let matrix = xm_matrix_multiply(&Mat44f { m: camera.matrix }, &Mat44f { m: model }).m;
+                CameraFrame { matrix, fov: camera.fov, near: self.near }
+            }
+            CameraMode::Drivable => self.drivable_view(view, shape, &model, acc_g, dt),
+            // the caller draws the track's cameras; without them (a track that has none), the
+            // view driven with before
+            CameraMode::Track => {
+                let mut driving = *self;
+                driving.mode = self.last_driving;
+                let frame = driving.update(view, shape, acc_g, dt);
+                *self = DrivingCamera { mode: CameraMode::Track, ..driving };
+                frame
+            }
+        };
+        self.near = frame.near;
+        frame
+    }
+
+    /// `CameraOnBoard::update` 0x1400c9ea0.
+    fn cockpit(&mut self, view: &CarView, shape: &CarShape, model: &Mat, acc_g: [f32; 3], dt: f32) -> CameraFrame {
+        let c = &mut self.cockpit;
+        let mut heading = normalized(row(model, 2));
+        let mut up = normalized(row(model, 1));
+        if c.world_aligned {
+            let length = (heading[2] * heading[2] + heading[0] * heading[0]).sqrt();
+            heading[1] = 0.0;
+            if length != 0.0 {
+                let k = 1.0 / length;
+                heading = [heading[0] * k, 0.0 * k, heading[2] * k];
+            }
+            up = [0.0, 1.0, 0.0];
+        }
+        let eye = point(model, shape.eye_model);
+        let m = model;
+        // in VR the head stays at the eyes unless system/cfg/assetto_corsa.ini [VR]
+        // ENABLE_CAMERA_SHAKE asks for the g forces and the shake (the headset moves it)
+        let position = if self.vr && !self.vr_camera_shake {
+            eye
+        } else {
+        // the head moves with the g forces, lagging
+        let g = [c.g_force_mix[0] * acc_g[0], c.g_force_mix[1] * acc_g[1], c.g_force_mix[2] * acc_g[2]];
+        let target = [g[1] * m[1][0] + g[0] * m[0][0] + g[2] * m[2][0], g[1] * m[1][1] + g[0] * m[0][1] + g[2] * m[2][1], g[1] * m[1][2] + g[0] * m[0][2] + g[2] * m[2][2]];
+        for (offset, target) in c.g_force_offset.iter_mut().zip(target) {
+            *offset = target + (*offset - target) * c.g_force_lag_mix;
+        }
+        // and shakes with the speed (`SignalGenerator3D<SinSignalGenerator>`)
+        let k = if c.still_camera { 0.0 } else { clamp_to(view.speed_ms * 0.01, 0.0, 1.0) };
+        for i in 0..3 {
+            let step = ((c.rand.next() as f32 * RAND_UNIT * dt - dt) * c.random_blend + dt) * 1000.0 * c.shake_freq_now[i];
+            c.shake[i] = c.shake[i].wrapping_add(if step > -2147483648.0 && step < 2147483648.0 { step as i32 } else { i32::MIN });
+            c.shake_freq_now[i] = k * c.shake_freq[i];
+        }
+        let s: Vec<f32> = (0..3).map(|i| rustyac_math::sinf(c.shake[i] as f32 * 0.001) * (k * c.shake_scale[i])).collect();
+        let fade = clamp_to(view.speed_ms * 0.3, 0.0, 1.0);
+        let o = c.g_force_offset;
+        // (the machine adds the shake up first, then the head's offset)
+        let shake: Vec<f32> = (0..3).map(|j| s[0] * m[0][j] + s[1] * m[1][j] + s[2] * m[2][j]).collect();
+        [(c.shake_mul * o[0] + shake[0]) * fade + eye[0], (c.shake_mul * o[1] + shake[1]) * fade + eye[1], (c.shake_mul * o[2] + shake[2]) * fade + eye[2]]
+        };
+        let mut matrix = set_from_heading_up(heading, up, position);
+        let a = self.actions;
+        if let Some((turn, place)) = self.head {
+            // the head tracker: turned by its angles, then moved along the turned axes
+            const K: f32 = 0.017_453;
+            matrix = rotate_roll(&rotate_pitch(&rotate_heading(&matrix, turn[1] * K), turn[0] * K), turn[2] * K);
+            let (x, y, z) = (-place[0], place[1], place[2]);
+            let [r0, r1, r2, _] = matrix;
+            for (j, v) in matrix[3][..3].iter_mut().enumerate() {
+                *v += (r1[j] * y + r0[j] * x) + r2[j] * z;
+            }
+        } else if self.vr {
+            // (no glance in VR: the look keys recentre the headset instead)
+        } else if a >> 9 & 1 != 0 || (a & 1 != 0 && a >> 1 & 1 != 0) {
+            // CameraOnBoard::lookBack 0x1400c9a60
+            let p = point(model, shape.look_back);
+            matrix[3] = [p[0], p[1], p[2], matrix[3][3]];
+            matrix = rotate_heading(&matrix, LOOK_BACK);
+        } else {
+            // lookLeftRight 0x1400c9b80
+            let direction = if a >> 1 & 1 != 0 { -1.0 } else if a & 1 != 0 { 1.0 } else { 0.0 };
+            c.head_animation = turn_head(c.head_animation, direction, c.head_rotation_degrees, dt * c.head_rotation_speed);
+            matrix = rotate_pitch(&rotate_heading(&matrix, c.yaw + c.head_animation), shape.eye_pitch);
+        }
+        CameraFrame { matrix, fov: shape.onboard_fov, near: 0.05 }
+    }
+
+    /// `CameraDrivableManager::update` 0x1400c6a30 and its views, then `updateLook` 0x1400c7de0.
+    fn drivable_view(&mut self, view: &CarView, shape: &CarShape, model: &Mat, acc_g: [f32; 3], dt: f32) -> CameraFrame {
+        let a = self.actions;
+        let back = a >> 9 & 1 != 0 || (a & 1 != 0 && a >> 1 & 1 != 0);
+        let (mut matrix, fov, near) = match self.drivable {
+            Drivable::Chase | Drivable::Chase2 => return self.chase_view(view, model, acc_g, dt),
+            // updateBonnet @ 0x1400c6ba0, updateBumper @ 0x1400c6df0, updateDash @ 0x1400c7b50:
+            // the bonnet view is all on the physics body; the bumper view takes its axes from
+            // the model and its place from the body; the dash view the other way round, with
+            // the cockpit's field of view and no pitch
+            Drivable::Bonnet => {
+                let mut m = rotate_pitch(&set_from_heading_up(row(&view.body, 2), row(&view.body, 1), [0.0; 3]), shape.bonnet_pitch);
+                let p = point(&view.body, shape.bonnet_pos);
+                m[3] = [p[0], p[1], p[2], 1.0];
+                (m, 60.0, 0.05)
+            }
+            Drivable::Bumper => {
+                let mut m = rotate_pitch(&set_from_heading_up(normalized(row(model, 2)), normalized(row(model, 1)), [0.0; 3]), shape.bumper_pitch);
+                let p = point(&view.body, shape.bumper_pos);
+                m[3] = [p[0], p[1], p[2], 1.0];
+                (m, 60.0, 0.05)
+            }
+            Drivable::Dash => (set_from_heading_up(row(&view.body, 2), row(&view.body, 1), point(model, shape.dash_pos)), shape.onboard_fov, 0.05),
+        };
+        if back {
+            // CameraDrivableManager::lookBack 0x1400c6660
+            let p = point(model, shape.drivable_look_back);
+            matrix[3] = [p[0], p[1], p[2], matrix[3][3]];
+            matrix = rotate_heading(&matrix, LOOK_BACK);
+        } else {
+            let direction = if a >> 1 & 1 != 0 { -1.0 } else if a & 1 != 0 { 1.0 } else { 0.0 };
+            self.rotation_animation = turn_head(self.rotation_animation, direction, self.rotation_degrees, dt * self.rotation_speed);
+            matrix = rotate_heading(&matrix, shape.drivable_yaw + self.rotation_animation);
+        }
+        CameraFrame { matrix, fov, near }
+    }
+
+    /// `CameraDrivableManager::updateChase` 0x1400c7120.
+    fn chase_view(&mut self, view: &CarView, body: &Mat, acc_g: [f32; 3], dt: f32) -> CameraFrame {
+        let (distance, height, pitch) = self.chase[(self.drivable == Drivable::Chase2) as usize];
+        // an upside-down car is looked at from below
+        let h = if 0.0 < view.body[1][1] { height } else { -height };
+        let kmh = view.speed_ms * 3.6;
+        let k = clamp_to(kmh * 0.1, 0.0, 1.0);
+        let gx = clamp_to(acc_g[0] * self.acc_gx_mul, -0.5, 0.5);
+        let gz = clamp_to(acc_g[2] * self.acc_gz_mul, -0.5, 0.5);
+        let target = [0.0 + gx * k, h, -distance + gz * k];
+        let e = sub(self.current_offset, target);
+        if 2.0 <= e[1] * e[1] + e[0] * e[0] + e[2] * e[2] || kmh < 2.0 {
+            self.current_offset = target;
+        } else {
+            let f = clamp_to(dt * self.chase_filter, 0.0, 1.0);
+            for (offset, target) in self.current_offset.iter_mut().zip(target) {
+                *offset += (target - *offset) * f;
+            }
+        }
+        // the middle of the rear axle
+        let p = times(add(row(&view.hubs[2], 3), row(&view.hubs[3], 3)), 0.5);
+        let o = self.current_offset;
+        let eye = add(add(add(times(row(body, 0), o[0]), times(row(body, 1), o[1])), times(row(body, 2), o[2])), p);
+        // a point 4 m ahead of the rear axle
+        let look = add(p, times(row(body, 2), 4.0));
+        let mut matrix = rotate_pitch(&create_target_exact(eye, look), pitch);
+        // the look keys turn the camera about the car (and leave the pitch out)
+        let a = self.actions;
+        let step = dt * self.rotation_speed;
+        let (angle, z) = if a >> 9 & 1 != 0 || (a & 1 != 0 && a >> 1 & 1 != 0) {
+            (LOOK_BACK, -distance - 2.0)
+        } else {
+            let direction = if a & 1 != 0 { 1.0 } else if a >> 1 & 1 != 0 { -1.0 } else { 0.0 };
+            let r = self.rotation_chase;
+            if r == 0.0 && direction == 0.0 {
+                return CameraFrame { matrix, fov: 60.0, near: 1.0 };
+            }
+            if direction != 0.0 {
+                let turned = direction * step + r;
+                if turned.abs() < self.rotation_degrees * 0.017_453 {
+                    self.rotation_chase = turned;
+                }
+            } else if r.abs() <= step * 2.0 * 0.017_453 {
+                self.rotation_chase = 0.0;
+            } else {
+                self.rotation_chase = -(sign(r) * step) + r;
+                if sign(r) != sign(self.rotation_chase) {
+                    self.rotation_chase = 0.0;
+                }
+            }
+            (self.rotation_chase, -distance)
+        };
+        let turn = Mat44f::create_from_axis_angle(&Vec3f::new(0.0, 1.0, 0.0), angle).m;
+        let at = point(&turn, [0.0, h, z]);
+        let ahead = point(&turn, times(row(body, 2), 4.0));
+        let position = point(body, at);
+        matrix = create_target_exact(position, add(row(body, 3), ahead));
+        CameraFrame { matrix, fov: 60.0, near: 1.0 }
+    }
+}
+
+/// `Camera::rotateHeading`'s look back: 3.14154 (not quite pi).
+const LOOK_BACK: f32 = f32::from_bits(0x4049_0efe);
+
+/// The game's `if (x <= hi) { if (x < lo) lo else x } else hi` (a NaN is `hi`).
+fn clamp_to(x: f32, lo: f32, hi: f32) -> f32 {
+    if x <= hi {
+        if x < lo {
+            lo
+        } else {
+            x
+        }
+    } else {
+        hi
+    }
+}
+
+/// The game's sign: 1, 0, -1 (a NaN is 1).
+fn sign(x: f32) -> f32 {
+    if x <= 0.0 {
+        if 0.0 <= x {
+            0.0
+        } else {
+            -1.0
+        }
+    } else {
+        1.0
+    }
+}
+
+/// `CameraOnBoard::lookLeftRight`'s and `CameraDrivableManager::updateLook`'s head turn: toward
+/// `direction` × `degrees` at `step` radians a frame, back to 0 the same way.
+fn turn_head(animation: f32, direction: f32, degrees: f32, step: f32) -> f32 {
+    let target = (direction * degrees).abs() * 0.017_453;
+    if step < target - animation.abs() {
+        return direction * step + animation;
+    }
+    if target != 0.0 && sign(direction) == sign(animation) {
+        return target * direction;
+    }
+    let back = (animation.abs() - step) * sign(animation);
+    if back.abs() - step < step {
+        0.0
+    } else {
+        back
+    }
+}
+
+/// `Camera::rotateRoll` @ 0x14020fb30: a turn about the camera's own z axis.
+pub fn rotate_roll(camera: &Mat, angle: f32) -> Mat {
+    let turn = Mat44f::create_from_axis_angle(&Vec3f::new(0.0, 0.0, 1.0), angle);
+    xm_matrix_multiply(&turn, &Mat44f { m: *camera }).m
+}
+
+/// `Camera::rotateHeading` 0x14020f940: a turn about the camera's own y axis.
+pub fn rotate_heading(camera: &Mat, angle: f32) -> Mat {
+    let turn = Mat44f::create_from_axis_angle(&Vec3f::new(0.0, 1.0, 0.0), angle);
+    xm_matrix_multiply(&turn, &Mat44f { m: *camera }).m
+}
+
+/// `CameraModeStart` (`eStart`, ctor 0x14005f940, `updateCar` 0x140060470): the camera of a
+/// session that begins in the ESC menu, until "Drive". It stands 3 m to the driver's side of
+/// car 0 and 2 m behind it, 1.75 m above the first tyre's contact point, and looks at the car
+/// with a slow random drift. Its random numbers are the C library's `rand()`; the game shares
+/// that generator with others and its seed is not known, so the drift is the same kind, not
+/// the same numbers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StartCamera {
+    /// the C library's generator (the game's is the process's one)
+    pub rand: MsvcRand,
+    target_car_pos: [f32; 3],
+    current_target: [f32; 3],
+    target_car_pos_blend: f32,
+    pan_vel: f32,
+    /// never read by the game; only its two `rand()` calls count
+    target_pos: [f32; 3],
+    pos_blend: f32,
+    first_frames: u32,
+    /// `crew.ini [HEADER] SIDE`, negated: the side the camera stands on in the pit box
+    crew_side: f32,
+}
+
+/// `rand()` to 0..1 (0x38000100)
+const RAND_UNIT: f32 = f32::from_bits(0x3800_0100);
+
+impl StartCamera {
+    /// The ctor's values; `crew_side` from [`StartCamera::crew_side`].
+    pub fn new(crew_side: f32) -> StartCamera {
+        StartCamera {
+            rand: MsvcRand(1),
+            target_car_pos: [0.0; 3],
+            current_target: [0.0; 3],
+            target_car_pos_blend: 2.0,
+            pan_vel: 0.4,
+            target_pos: [0.0; 3],
+            pos_blend: -2.0,
+            first_frames: 0,
+            crew_side,
+        }
+    }
+
+    /// The ctor's `crew.ini`: `content/tracks/<track>/[<layout>/]data/crew.ini`, `-[HEADER] SIDE`;
+    /// -1 when the file cannot be read.
+    pub fn crew_side(track_folder: &Path, layout: &str) -> f32 {
+        let path = if layout.is_empty() { track_folder.join("data/crew.ini") } else { track_folder.join(layout).join("data/crew.ini") };
+        match ControlsIni::load(&path) {
+            Ok(ini) => -ini.get_float("HEADER", "SIDE"),
+            Err(_) => -1.0,
+        }
+    }
+
+    /// `update` 0x140060420 on car 0, whose driver's eyes are `eye_x` across the 3D model
+    /// (`CarAvatar::driverEyesPosition.x`).
+    pub fn update(&mut self, car: &CarView, eye_x: f32, dt: f32) -> CameraFrame {
+        let m = &car.body;
+        let contact = &car.render.contact_point;
+        let (mut sum_x, mut sum_z) = (0.0f32, 0.0f32);
+        for p in contact {
+            sum_x += p[0];
+            sum_z += p[2];
+        }
+        let y0 = contact[0][1];
+        sum_x *= 0.25;
+        sum_z *= 0.25;
+        let c = [m[3][0], m[3][1], m[3][2]];
+        let mut s = if eye_x < 0.0 { -1.0f32 } else { 1.0 };
+        // CarAvatar::isInPit 0x1400d8bd0
+        let d = sub(c, car.pit_position);
+        // (`setb`: a NaN distance is in the pit too)
+        let distance = ((d[1] * d[1] + d[0] * d[0]) + d[2] * d[2]).sqrt();
+        if distance < 1.5 || distance.is_nan() {
+            s = self.crew_side;
+        }
+        let eye = [-m[2][0] * 2.0 + (m[0][0] * 3.0 * s + sum_x), y0 + 1.75, -m[2][2] * 2.0 + (m[0][2] * 3.0 * s + sum_z)];
+        let dt = if dt > 0.5 { 0.5 } else { dt };
+        if 0.0 > self.pos_blend {
+            self.pos_blend = 2.0;
+            self.target_pos = eye;
+            self.target_car_pos = c;
+        }
+        if self.target_car_pos_blend > 1.0 || self.first_frames < 100 {
+            self.current_target = self.target_car_pos;
+            let r1 = self.rand.next() as f32 * RAND_UNIT;
+            self.target_car_pos[2] = r1 * 0.2 - 0.1 + c[2];
+            let r2 = self.rand.next() as f32 * RAND_UNIT;
+            self.target_car_pos[1] = r2 * 0.0 - 0.1 + c[1];
+            let r3 = self.rand.next() as f32 * RAND_UNIT;
+            self.target_car_pos[0] = r3 * 0.2 - 0.1 + c[0];
+            if self.first_frames < 100 {
+                self.first_frames += 1;
+                self.target_car_pos = c;
+                self.current_target = c;
+            }
+            self.target_car_pos_blend = 0.0;
+            let r4 = self.rand.next() as f32 * RAND_UNIT;
+            self.pan_vel = r4 * f32::from_bits(0x3e4c_ccce) + 0.1;
+        }
+        if self.pos_blend > 1.0 {
+            self.pos_blend = 0.0;
+            let r1 = self.rand.next() as f32 * RAND_UNIT;
+            self.target_pos[2] = r1 * 0.6 - 0.3 + eye[2];
+            let r2 = self.rand.next() as f32 * RAND_UNIT;
+            self.target_pos[0] = r2 * 0.6 - 0.3 + eye[0];
+            self.target_pos[1] = eye[1];
+        }
+        let t = self.target_car_pos_blend;
+        let sm = (3.0 - t * 2.0) * (t * t);
+        let mut look = [0.0; 3];
+        for (i, look) in look.iter_mut().enumerate() {
+            *look = (self.target_car_pos[i] - self.current_target[i]) * sm + self.current_target[i];
+        }
+        if dt < 0.5 {
+            self.target_car_pos_blend += dt * self.pan_vel;
+        }
+        self.pos_blend += dt * f32::from_bits(0x3d23_d70a);
+        CameraFrame { matrix: create_target_exact(eye, look), fov: 40.0, near: 0.1 }
+    }
+}
+
+/// What the free camera reads of the keyboard and the mouse in a frame (`GetAsyncKeyState`,
+/// `GetCursorPos`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MouseCameraInput {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    /// the right mouse button
+    pub look: bool,
+    pub cursor: (i32, i32),
+}
+
+/// F7 (`eFree`, only with `system/cfg/assetto_corsa.ini [CAMERA] ALLOW_FREE_CAMERA` above 0):
+/// `CameraMouseControl` (ctor 0x14023fda0, update 0x140240040). It starts where the last
+/// camera was and keeps its field of view; the arrows move it 25 m/s (Shift x0.05, Ctrl x50),
+/// the mouse turns it while the right button is held.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MouseCamera {
+    pub matrix: Mat,
+    pub fov: f32,
+    last_mouse: (i32, i32),
+    last_down: bool,
+}
+
+impl MouseCamera {
+    /// `setMode(eFree)`: the shared camera as the last mode left it, near plane 0.05.
+    pub fn new(last: &CameraFrame) -> MouseCamera {
+        MouseCamera { matrix: last.matrix, fov: last.fov, last_mouse: (0, 0), last_down: false }
+    }
+
+    /// `Camera::moveForward` 0x14020f0a0 (along minus row 2).
+    pub fn move_forward(&mut self, d: f32) {
+        let axis = self.matrix[2];
+        for (p, a) in self.matrix[3].iter_mut().zip(axis).take(3) {
+            *p += -a * d;
+        }
+    }
+
+    /// `Camera::moveRight` 0x14020f0f0 (along row 0).
+    pub fn move_right(&mut self, d: f32) {
+        let axis = self.matrix[0];
+        for (p, a) in self.matrix[3].iter_mut().zip(axis).take(3) {
+            *p += a * d;
+        }
+    }
+
+    /// `Camera::moveUpWorld` 0x14020f130 (`_42 += d`).
+    pub fn move_up_world(&mut self, d: f32) {
+        self.matrix[3][1] += d;
+    }
+
+    /// `Camera::rotatePitch` 0x14020fa80 / `rotateHeading` 0x14020f940 / `rotateRoll`
+    /// 0x14020fb30: about x, y or z (`axis` 0, 1, 2), the turn first.
+    pub fn rotate(&mut self, axis: usize, angle: f32) {
+        let mut v = [0.0f32; 3];
+        v[axis] = 1.0;
+        let turn = Mat44f::create_from_axis_angle(&Vec3f::new(v[0], v[1], v[2]), angle);
+        self.matrix = xm_matrix_multiply(&turn, &Mat44f { m: self.matrix }).m;
+    }
+
+    /// The camera without a step (the window has no focus: the game does not run it).
+    pub fn frame(&self) -> CameraFrame {
+        CameraFrame { matrix: self.matrix, fov: self.fov, near: 0.05 }
+    }
+
+    /// `CameraMouseControlBase::update` 0x14020ff30: `stepKeyboard` 0x14020fe00, then
+    /// `mouseLook` 0x14020fcc0.
+    pub fn update(&mut self, input: &MouseCameraInput, dt: f32) -> CameraFrame {
+        let mut speed = 25.0f32;
+        if input.shift {
+            speed *= 0.05;
+        }
+        if input.ctrl {
+            speed *= 50.0;
+        }
+        if input.up {
+            self.move_forward(dt * speed);
+        }
+        if input.down {
+            self.move_forward(-(dt * speed));
+        }
+        if input.left {
+            self.move_right(-(dt * speed));
+        }
+        if input.right {
+            self.move_right(dt * speed);
+        }
+        let (x, y) = input.cursor;
+        if input.look && self.last_down {
+            let per = f32::from_bits(0x3c88_8889);
+            self.matrix = rotate_pitch(&self.matrix, -((y.wrapping_sub(self.last_mouse.1) as f32 * 0.01) * self.fov * per));
+            // Camera::rotateOnAxis 0x14020f9f0 about row 1 of the inverse of the matrix after
+            // the pitch (XMMatrixInverse's second row, returned in xmm1)
+            let inverse = rustyac_physics::vecmath::xm_matrix_inverse(&Mat44f { m: self.matrix }).m;
+            let axis = Vec3f::new(inverse[1][0], inverse[1][1], inverse[1][2]);
+            let turn = Mat44f::create_from_axis_angle(&axis, (self.last_mouse.0.wrapping_sub(x) as f32 * 0.01) * self.fov * per);
+            self.matrix = xm_matrix_multiply(&turn, &Mat44f { m: self.matrix }).m;
+        }
+        self.last_down = input.look;
+        self.last_mouse = (x, y);
+        self.frame()
+    }
+}
+
+/// What `--camera` accepts.
+pub fn camera_name_error(name: &str) -> String {
+    format!("--camera: {name:?} is not one of cockpit, chase, chase2, bonnet, bumper, dash, track, car0, car1 ... (the cameras of the car's cameras.ini)")
+}
+
+/// A camera of a car's `data/cameras.ini` (`CameraCarDefinition`): its matrix in the frame of
+/// the car's 3D model, and its own vertical field of view in degrees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarCamera {
+    pub matrix: Mat,
+    pub fov: f32,
+}
+
+/// `CarAvatar::initCameraCar` @ 0x1400d47c0: the sections `[CAMERA_0]`, `[CAMERA_1]` ... up to
+/// the first one missing, at most six. `POSITION`, `FORWARD` and `UP` are in the model's axes
+/// (+x the car's left, +y up, +z forward) and nothing is mirrored; `UP` is made square to
+/// `FORWARD`; a field of view that is not above zero is 60.
+pub fn load_car_cameras(ini: &ControlsIni) -> Vec<CarCamera> {
+    let mut count = 0;
+    while ini.has_section(&format!("CAMERA_{count}")) {
+        count += 1;
+    }
+    let unit = |v: [f32; 3]| {
+        let length = ((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]).sqrt();
+        if length != 0.0 {
+            let inverse = 1.0 / length;
+            [v[0] * inverse, v[1] * inverse, v[2] * inverse]
+        } else {
+            v
+        }
+    };
+    // the game's cross product at this place, term by term
+    let side = |u: [f32; 3], f: [f32; 3]| [u[2] * f[1] - u[1] * f[2], u[0] * f[2] - u[2] * f[0], u[1] * f[0] - u[0] * f[1]];
+    let upright = |s: [f32; 3], f: [f32; 3]| [s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]];
+    (0..count.min(6))
+        .map(|index| {
+            let section = format!("CAMERA_{index}");
+            let vector = |key: &str| three(ini.get_string(&section, key)).unwrap_or([0.0; 3]);
+            let position = vector("POSITION");
+            let forward = unit(vector("FORWARD"));
+            let up = unit(vector("UP"));
+            let s = unit(side(up, forward));
+            let up = unit(upright(s, forward));
+            let s = unit(side(up, forward));
+            let fov = ini.get_float(&section, "FOV");
+            CarCamera {
+                matrix: [
+                    [s[0], s[1], s[2], 0.0],
+                    [up[0], up[1], up[2], 0.0],
+                    [-forward[0], -forward[1], -forward[2], 0.0],
+                    [position[0], position[1], position[2], 1.0],
+                ],
+                fov: if fov > 0.0 { fov } else { 60.0 },
+            }
+        })
+        .collect()
+}
+
+/// A vertex of the solid shapes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+/// A cube of edge 1 around the origin, as triangles.
+pub fn cube() -> Vec<Vertex> {
+    let mut out = Vec::with_capacity(36);
+    for axis in 0..3 {
+        for sign in [-1.0f32, 1.0] {
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            let mut normal = [0.0; 3];
+            normal[axis] = sign;
+            let corner = |a: f32, b: f32| {
+                let mut p = [0.0; 3];
+                p[axis] = sign * 0.5;
+                p[u] = a * 0.5;
+                p[v] = b * 0.5;
+                Vertex { position: p, normal }
+            };
+            let quad = [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)];
+            out.extend([quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]]);
+        }
+    }
+    out
+}
+
+/// A cylinder of radius 1 and width 1 around the origin, its axis along x (a wheel spins
+/// about its own x axis), as triangles.
+pub fn cylinder(segments: usize) -> Vec<Vertex> {
+    let mut out = Vec::with_capacity(segments * 12);
+    let ring = |k: usize| {
+        let angle = k as f32 / segments as f32 * std::f32::consts::TAU;
+        (angle.cos(), angle.sin())
+    };
+    for k in 0..segments {
+        let (y0, z0) = ring(k);
+        let (y1, z1) = ring(k + 1);
+        let side = |x: f32, y: f32, z: f32| Vertex { position: [x, y, z], normal: [0.0, y, z] };
+        out.extend([side(-0.5, y0, z0), side(0.5, y0, z0), side(0.5, y1, z1), side(-0.5, y0, z0), side(0.5, y1, z1), side(-0.5, y1, z1)]);
+        for x in [-0.5f32, 0.5] {
+            let cap = |y: f32, z: f32| Vertex { position: [x, y, z], normal: [x.signum(), 0.0, 0.0] };
+            out.extend([cap(0.0, 0.0), cap(y0, z0), cap(y1, z1)]);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn free_camera_stands_level_beside_the_car() {
+        // a car at (10, 2, 30) heading along +x, nose up a little: its left is then -z
+        let body: super::Mat = [[0.0, 0.0, -1.0, 0.0], [-0.1, 0.995, 0.0, 0.0], [0.995, 0.1, 0.0, 0.0], [10.0, 2.0, 30.0, 1.0]];
+        let m = super::free_camera(&body, [4.0, 0.5, -6.0], [0.0, 0.5, 0.0]);
+        // 4 m to the right (+z here), 6 m behind (-x), half a metre up, whatever the pitch
+        let place = [m[3][0], m[3][1], m[3][2]];
+        for (got, want) in place.iter().zip([4.0f32, 2.5, 34.0]) {
+            assert!((got - want).abs() < 1e-4, "{place:?}");
+        }
+        // it looks at the car (a camera looks along minus its row 2), level, and does not roll
+        let view = [-m[2][0], -m[2][1], -m[2][2]];
+        let to_car = [6.0f32 / 52.0f32.sqrt(), 0.0, -4.0 / 52.0f32.sqrt()];
+        for (got, want) in view.iter().zip(to_car) {
+            assert!((got - want).abs() < 1e-4, "{view:?}");
+        }
+        assert!((m[1][1] - 1.0).abs() < 1e-5 && m[0][1].abs() < 1e-5);
+    }
+
+    use super::*;
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
+    }
+
+    /// A car standing at the origin, nose towards +z, as the spawn puts it.
+    fn standing() -> CarView {
+        let mut view = CarView { body: translation(0.0, 0.25, 0.0), ..CarView::default() };
+        // the F2004's rear hubs
+        view.hubs[2] = translation(0.7025, 0.33, -1.3664);
+        view.hubs[3] = translation(-0.7025, 0.33, -1.3664);
+        view
+    }
+
+    #[test]
+    fn the_chase_camera_sits_behind_the_rear_axle() {
+        let mut camera = DrivingCamera::chase();
+        let frame = camera.update(&standing(), &CarShape::plain(), [0.0; 3], 0.016);
+        // 3.0 m behind and 1.4 m above the middle of the rear axle
+        assert!(close(row(&frame.matrix, 3), [0.0, 0.33 + 1.4, -1.3664 - 3.0]), "{:?}", frame.matrix[3]);
+        // it looks forward and a little down: row 3 is minus the view direction
+        let direction = times(row(&frame.matrix, 2), -1.0);
+        assert!(direction[2] > 0.97 && direction[1] < -0.1 && direction[0].abs() < 1e-5, "{direction:?}");
+        assert_eq!((frame.fov, frame.near), (60.0, 1.0));
+        // the far chase camera
+        let mut far = DrivingCamera { drivable: Drivable::Chase2, ..DrivingCamera::chase() };
+        assert!(close(row(&far.update(&standing(), &CarShape::plain(), [0.0; 3], 0.016).matrix, 3), [0.0, 0.33 + 1.9, -1.3664 - 3.9]));
+    }
+
+    #[test]
+    fn the_chase_camera_leans_with_the_g_forces() {
+        let mut camera = DrivingCamera::chase();
+        let mut view = standing();
+        view.speed_kmh = 150.0;
+        view.speed_ms = 150.0 / 3.6;
+        camera.update(&view, &CarShape::plain(), [0.0; 3], 0.016);
+        // 2 g sideways: the target is 0.5 m to the side (the clamp), approached by dt * 3
+        let frame = camera.update(&view, &CarShape::plain(), [2.0, 0.0, 0.0], 0.1);
+        let x = frame.matrix[3][0];
+        assert!((x - 0.15).abs() < 1e-4, "{x}");
+        // standing still there is no lag at all
+        view.speed_kmh = 0.0;
+        view.speed_ms = 0.0;
+        assert_eq!(camera.update(&view, &CarShape::plain(), [2.0, 0.0, 0.0], 0.1).matrix[3][0], 0.0);
+    }
+
+    #[test]
+    fn the_f2004_s_eye_point() {
+        let Some(data) = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cardata/ks_ferrari_f2004")].into_iter().find(|p| p.join("car.ini").is_file())
+        else {
+            eprintln!("NOT TESTED: cardata/ks_ferrari_f2004 is missing");
+            return;
+        };
+        let wheels = [[0.735, 0.1, 1.6836], [-0.735, 0.1, 1.6836], [0.7025, 0.02, -1.3664], [-0.7025, 0.02, -1.3664]];
+        let shape = CarShape::load(&data, &wheels, &[0.245, 0.245, 0.325, 0.325], &[0.33; 4]);
+        // spec 4.6: (0.000573, 0.452217, 0.277742) from the centre of mass, pitch -5.264918 degrees
+        assert!(close(shape.eye, [0.000573, 0.452217, 0.277742]), "{:?}", shape.eye);
+        assert!((shape.eye_pitch + 0.0918886).abs() < 1e-5);
+        // the six collision boxes, the tub and the helmet
+        assert_eq!(shape.boxes.len(), 8);
+        // the cockpit camera is at the eye point and looks ahead, slightly down
+        let mut camera = DrivingCamera { mode: CameraMode::Cockpit, ..DrivingCamera::chase() };
+        let frame = camera.update(&standing(), &shape, [0.0; 3], 0.016);
+        assert!(close(row(&frame.matrix, 3), [0.000573, 0.25 + 0.452217, 0.277742]));
+        let direction = times(row(&frame.matrix, 2), -1.0);
+        assert!(direction[2] > 0.99 && direction[1] < -0.08 && direction[1] > -0.1, "{direction:?}");
+    }
+
+    /// The F2004's `cameras.ini`, `car.ini` and `dash_cam.ini` values the views are made of.
+    fn f2004_shape() -> CarShape {
+        let cameras = ControlsIni::parse(
+            "[CAMERA_0]\nPOSITION=0.0035553,1.0791,-0.40759\nFORWARD=-0.0049209,-0.18102,0.98347\nUP=0.004713,0.98346,0.18104\nFOV=60\nEXPOSURE=26\n\
+             [CAMERA_1]\nPOSITION=0.82675,0.61309,-0.14557\nFORWARD=0.062927,-0.076572,0.99508\nUP=0.017173,0.99699,0.075633\nFOV=60\n\
+             [CAMERA_2]\nPOSITION=-0.32285,0.80252,-0.089554\nFORWARD=-0.030636,0.060454,0.9977\nUP=0.027757,0.99784,-0.05961\nFOV=45\n\
+             [CAMERA_3]\nPOSITION=-0.35515,0.6834,0.57217\nFORWARD=0.39638,-0.030345,-0.91759\nUP=0.017972,0.99952,-0.02529\nFOV=60\n\
+             [CAMERA_4]\nPOSITION=0.27107,0.84532,-0.10077\nFORWARD=0.10486,-0.16778,-0.98023\nUP=-0.018188,0.98518,-0.17057\nFOV=60\n\
+             [CAMERA_5]\nPOSITION=0.0032349,1.0891,-0.59433\nFORWARD=0.017753,-0.085741,-0.99616\nUP=0.0018743,0.99632,-0.085721\nFOV=0\n",
+        );
+        CarShape {
+            graphics_pitch: -0.5 * 0.017_453,
+            graphics_offset: [0.0, -0.23, 0.35],
+            bonnet_pos: [0.0, 0.8, -0.07],
+            bonnet_pitch: -13.749608 * 0.017_453,
+            bumper_pos: [0.0, 0.8, 3.0],
+            bumper_pitch: 0.0,
+            dash_pos: [0.000573258, 0.666138, 0.219858],
+            onboard_fov: 54.0,
+            car_cameras: load_car_cameras(&cameras),
+            ..CarShape::plain()
+        }
+    }
+
+    /// A camera's place and the direction it looks in.
+    fn place_and_view(frame: &CameraFrame) -> ([f32; 3], [f32; 3]) {
+        (row(&frame.matrix, 3), times(row(&frame.matrix, 2), -1.0))
+    }
+
+    fn near(a: [f32; 3], b: [f32; 3], tolerance: f32) -> bool {
+        (0..3).all(|k| (a[k] - b[k]).abs() <= tolerance)
+    }
+
+    #[test]
+    fn the_car_s_own_cameras() {
+        let shape = f2004_shape();
+        assert_eq!(shape.car_cameras.len(), 6);
+        // a car standing at the origin: the body's axes are the world's
+        let view = CarView::default();
+        let mut camera = DrivingCamera::from_name("car0", &shape).unwrap();
+        let frame = camera.update(&view, &shape, [0.0; 3], 0.016);
+        let (place, looks) = place_and_view(&frame);
+        // above and just behind the helmet, looking down the nose
+        assert!(near(place, [0.00356, 0.84554, -0.06698], 2e-4), "{place:?}");
+        assert!(near(looks, [-0.0049, -0.1724, 0.9850], 1e-3), "{looks:?}");
+        // the camera's right is the car's right (-x): nothing is mirrored
+        assert!((frame.matrix[0][0] + 1.0).abs() < 1e-3, "{:?}", frame.matrix[0]);
+        assert_eq!((frame.fov, frame.near, camera.name().as_str()), (60.0, 0.05, "car 0"));
+        // camera 2 has its own field of view; camera 5 looks back and its FOV=0 means 60
+        let mut camera = DrivingCamera::from_name("car2", &shape).unwrap();
+        assert_eq!(camera.update(&view, &shape, [0.0; 3], 0.016).fov, 45.0);
+        let mut camera = DrivingCamera::from_name("car5", &shape).unwrap();
+        let frame = camera.update(&view, &shape, [0.0; 3], 0.016);
+        assert!((place_and_view(&frame).1[2] + 0.9954).abs() < 1e-3 && frame.fov == 60.0 && frame.matrix[0][0] > 0.999);
+        // names that are not cameras
+        assert!(DrivingCamera::from_name("car6", &shape).unwrap_err().contains("car0 to car5"));
+        assert!(DrivingCamera::from_name("car0", &CarShape::plain()).unwrap_err().contains("no cameras.ini"));
+        assert!(DrivingCamera::from_name("roof", &shape).is_err());
+        // the sections end at the first gap; six at most
+        let gap = ControlsIni::parse("[CAMERA_0]\nPOSITION=0,1,0\nFORWARD=0,0,1\nUP=0,1,0\n[CAMERA_1]\nPOSITION=0,1,0\nFORWARD=0,0,1\nUP=0,1,0\n[CAMERA_3]\nPOSITION=0,1,0\n");
+        assert_eq!(load_car_cameras(&gap).len(), 2);
+        let eight: String = (0..8).map(|n| format!("[CAMERA_{n}]\nPOSITION=0,1,0\nFORWARD=0,0,1\nUP=0,1,0\n")).collect();
+        assert_eq!(load_car_cameras(&ControlsIni::parse(&eight)).len(), 6);
+        // straight ahead, upright: the game's own matrix for it (row 1 = -x)
+        let plain = load_car_cameras(&gap)[0];
+        assert_eq!(plain.matrix, [[-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 1.0]]);
+    }
+
+    #[test]
+    fn bonnet_bumper_and_dash() {
+        let shape = f2004_shape();
+        let view = CarView::default();
+        let shot = |name: &str| {
+            let mut camera = DrivingCamera::from_name(name, &shape).unwrap();
+            let frame = camera.update(&view, &shape, [0.0; 3], 0.016);
+            (place_and_view(&frame), frame.fov, frame.near)
+        };
+        // the bonnet view: on the physics body, pitched down by the car's own angle
+        let ((place, looks), fov, near_plane) = shot("bonnet");
+        assert!(near(place, [0.0, 0.8, -0.07], 1e-5) && near(looks, [0.0, -0.2377, 0.9713], 1e-3), "{place:?} {looks:?}");
+        assert_eq!((fov, near_plane), (60.0, 0.05));
+        // the bumper view: its place from the body, its axes from the model, whose nose points
+        // half a degree up for GRAPHICS_PITCH_ROTATION=-0.5 (the same turn that puts the
+        // car cameras where they are)
+        let ((place, looks), fov, _) = shot("bumper");
+        assert!(near(place, [0.0, 0.8, 3.0], 1e-5) && near(looks, [0.0, 0.00873, 0.99996], 1e-4), "{place:?} {looks:?}");
+        assert_eq!(fov, 60.0);
+        // the dash view: its place in the model's frame, level with the body, the cockpit's field of view
+        let ((place, looks), fov, _) = shot("dash");
+        assert!(near(place, [0.00057, 0.43804, 0.56397], 2e-4) && near(looks, [0.0, 0.0, 1.0], 1e-6), "{place:?} {looks:?}");
+        assert_eq!(fov, 54.0);
+    }
+
+    #[test]
+    fn f1_and_f6_as_in_the_game() {
+        let shape = f2004_shape();
+        let names = |camera: &mut DrivingCamera, keys: &str| -> Vec<String> {
+            keys.chars()
+                .map(|key| {
+                    if key == '1' {
+                        camera.f1()
+                    } else {
+                        camera.f6(shape.car_cameras.len())
+                    }
+                    camera.name()
+                })
+                .collect()
+        };
+        // F1 from the cockpit: the drivable views in turn, then the cockpit again
+        let mut camera = DrivingCamera::from_name("cockpit", &shape).unwrap();
+        assert_eq!(names(&mut camera, "1111111"), ["chase", "chase 2", "bonnet", "bumper", "dash", "cockpit", "chase"]);
+        // the drivable view is remembered while the cockpit is shown
+        let mut camera = DrivingCamera::from_name("bonnet", &shape).unwrap();
+        assert_eq!(names(&mut camera, "11111"), ["bumper", "dash", "cockpit", "chase", "chase 2"]);
+        // F6 enters the car's cameras and steps through them; F1 goes back where it was
+        // without moving on; F6 again shows the camera last used
+        let mut camera = DrivingCamera::chase();
+        assert_eq!(names(&mut camera, "66161"), ["car 0", "car 1", "chase", "car 1", "chase"]);
+        let mut camera = DrivingCamera::from_name("car5", &shape).unwrap();
+        assert_eq!(names(&mut camera, "6"), ["car 0"]);
+        // a car without cameras.ini: F6 does nothing
+        let mut camera = DrivingCamera::chase();
+        camera.f6(0);
+        assert_eq!(camera.name(), "chase");
+    }
+
+    #[test]
+    fn view_and_projection() {
+        // a camera at (1, 2, 3) looking along +z: a point 10 m ahead is on the axis, at depth 0..1
+        let camera = create_target([1.0, 2.0, 3.0], [1.0, 2.0, 13.0]);
+        let view = view_matrix(&camera);
+        let p = point(&view, [1.0, 2.0, 13.0]);
+        assert!(close(p, [0.0, 0.0, -10.0]), "{p:?}");
+        let projection = perspective(60.0, 16.0 / 9.0, 1.0, 3000.0);
+        let clip = |p: [f32; 3]| {
+            let w = p[2] * projection[2][3];
+            let z = p[2] * projection[2][2] + projection[3][2];
+            (p[0] * projection[0][0] / w, p[1] * projection[1][1] / w, z / w)
+        };
+        let (x, y, z) = clip([0.0, 0.0, -10.0]);
+        assert!(x == 0.0 && y == 0.0 && z > 0.0 && z < 1.0, "{z}");
+        // +x of the world (the car's left) is on the left of the picture when looking along +z
+        let left = point(&view, [2.0, 2.0, 13.0]);
+        assert!(clip(left).0 < 0.0);
+        assert!((clip([0.0, 0.0, -1.0]).2).abs() < 1e-6 && (clip([0.0, 0.0, -3000.0]).2 - 1.0).abs() < 1e-4);
+        // the same picture with the depth turned round: 1 at the near plane, 0 at the far one
+        let reversed = perspective_reversed(60.0, 16.0 / 9.0, 1.0, 3000.0);
+        let depth = |z: f32| (z * reversed[2][2] + reversed[3][2]) / (z * reversed[2][3]);
+        assert!((depth(-1.0) - 1.0).abs() < 1e-6 && depth(-3000.0).abs() < 1e-6 && depth(-10.0) > depth(-20.0));
+        assert_eq!((reversed[0][0], reversed[1][1], reversed[2][3]), (projection[0][0], projection[1][1], projection[2][3]));
+        // a product of two matrices with large numbers that nearly cancel
+        let far_away = translation(1200.0, 30.0, -900.0);
+        let back = translation(-1200.0, -30.0, 900.0);
+        assert_eq!(mul_precise(&far_away, &back), crate::view::IDENTITY);
+        // meshes
+        assert_eq!(cube().len(), 36);
+        assert_eq!(cylinder(24).len(), 24 * 12);
+    }
+
+    /// Task 46b: the last camera as setMode remembers it and the next session takes it back.
+    #[test]
+    fn last_camera() {
+        let mut c = DrivingCamera::chase();
+        c.f1(); // chase to chase 2
+        assert_eq!(c.last_camera, (2, 1));
+        c.set_car_camera(0);
+        assert_eq!(c.last_camera, (2, 1));
+        c.set_mode_kept(0);
+        assert_eq!(c.last_camera, (0, 1));
+        c.random = true;
+        c.mode = CameraMode::Cockpit;
+        c.remember();
+        assert_eq!(c.last_camera, (0, 1));
+        let text = c.last_camera_ini(Some(b"[LAST_CAMERA]
+MODE=2
+DRIVABLE_MODE=4
+
+[FADE]
+COLOR=0,0,0
+"));
+        assert_eq!(String::from_utf8(text).unwrap(), "[LAST_CAMERA]
+MODE=0
+DRIVABLE_MODE=1
+
+[FADE]
+COLOR=0,0,0
+");
+        let mut next = DrivingCamera::chase();
+        next.last_camera = (2, 3);
+        assert_eq!(next.load_previous(), None);
+        assert_eq!((next.mode, next.drivable), (CameraMode::Drivable, Drivable::ALL[3]));
+        next.last_camera = (5, 0);
+        assert_eq!(next.load_previous(), Some(5));
+        // ACCameraManager's ctor: [LAST_CAMERA] and, when the section is there, [FADE] COLOR
+        let ini = ControlsIni::parse("[LAST_CAMERA]
+MODE=2
+DRIVABLE_MODE=3
+[FADE]
+COLOR=1,0.5,0
+");
+        next.read_settings(None, Some(&ini), None, 1.0);
+        assert_eq!((next.last_camera, next.fade_color), ((2, 3), [1.0, 0.5, 0.0]));
+    }
+}

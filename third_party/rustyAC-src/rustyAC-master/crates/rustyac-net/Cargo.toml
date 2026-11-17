@@ -1,0 +1,20 @@
+[package]
+name = "rustyac-net"
+description = "rustyAC multiplayer: Assetto Corsa's online protocol (the client of a Kunos acServer), its session logic and the remote cars' dead reckoning, behind a transport trait; no platform code, builds for wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[dependencies]
+rustyac-math = { path = "../rustyac-math" }
+rustyac-physics = { path = "../rustyac-physics" }
+
+# the WebSocket client of the desktop's transport through a gateway (plain std, no
+# dependencies of its own); a browser brings its own WebSocket
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustyac-gateway = { path = "../rustyac-gateway" }
+
+[dev-dependencies]
+rustyac-content = { path = "../rustyac-content" }

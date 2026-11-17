@@ -1,0 +1,115 @@
+{
+  "git_repo": false,
+  "git_binary_available": false,
+  "prospective_tracked_files": 742,
+  "prospective_tracked_mib": 34.4,
+  "findings": [
+    {
+      "kind": "local game install path",
+      "path": "PHASE2_3_4_REPORT.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "README.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "docs\\ARCHITECTURE.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "docs\\RESEARCH_SOURCES.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "local Windows username path",
+      "path": "logs\\00_environment.log",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "logs\\00_environment.log",
+      "detail": "informational"
+    },
+    {
+      "kind": "local Windows username path",
+      "path": "logs\\01_native_core_build.log",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "phase1\\PHASE0_PHASE1_REPORT.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "phase1\\run_direct.log",
+      "detail": "informational"
+    },
+    {
+      "kind": "local Windows username path",
+      "path": "phase6\\PREP_REPORT.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "phase6\\PREP_REPORT.md",
+      "detail": "informational"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase1\\screenshots\\01_launcher_loaded.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase1\\screenshots\\02_drive_lotus_magione.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase1\\screenshots\\03_track_list.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase1\\screenshots\\04_real_session_lotus_elise_sc_magione.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase1\\screenshots\\05_real_driving_cockpit.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase3\\shots\\magione_lotus.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase3\\shots\\perf3.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "SCREENSHOT",
+      "path": "phase3\\shots\\perf60.png",
+      "detail": "informational: rendered/UI evidence, not a game asset"
+    },
+    {
+      "kind": "local game install path",
+      "path": "rust\\ac-ios-runtime\\examples\\bench_render.rs",
+      "detail": "informational"
+    },
+    {
+      "kind": "local game install path",
+      "path": "rust\\ac-ios-runtime\\examples\\bench_sim.rs",
+      "detail": "informational"
+    }
+  ],
+  "missing_required": [],
+  "accidental_caches": []
+}

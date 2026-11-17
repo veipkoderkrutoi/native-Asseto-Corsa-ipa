@@ -1,0 +1,166 @@
+{
+  "generated_utc": "2026-11-17T18:24:16.359470+00:00",
+  "purpose": "Phase 5 device bring-up readiness; no IPA was built on this host",
+  "files": {
+    "ios/project.yml": {
+      "size": 2243,
+      "sha256": "101be8068b65e63fd6259df5127f9e437a355d3ba1d62915cd96a0f67490b9c9"
+    },
+    "ios/Info.plist": {
+      "size": 1362,
+      "sha256": "b8e97afa337bec40efa431a3bfe03d6e4dbdcd3fbc520383c7cbb6395d915c43"
+    },
+    "ios/exportOptions.plist": {
+      "size": 619,
+      "sha256": "b94b1e4c442c1fcdd0e52b5f8c763c679d784d936074b4c94f8643ed27313e6e"
+    },
+    "ios/ac-ios.entitlements": {
+      "size": 410,
+      "sha256": "399fb3a2a1bf5268bc97fdb208d9466852a7c5d113bc2a77b99cdfa3b71c255d"
+    },
+    "ios/main.m": {
+      "size": 348,
+      "sha256": "47f9c3329be6ac400721c990073e2a261529a1d4998d11696359672fbfd5fd12"
+    },
+    "ios/AppDelegate.h": {
+      "size": 820,
+      "sha256": "d7ad19d551e5e4e854b490c6d027c76db96c683d9ebd743402f644d9298a0a94"
+    },
+    "ios/AppDelegate.m": {
+      "size": 3656,
+      "sha256": "6a115168cf6cb0ffdb65165672058c85cee07bf5f0722fb2ee8514d55988a26d"
+    },
+    "ios/GameViewController.h": {
+      "size": 137,
+      "sha256": "5b02555f80ee2b09169522853624eed4bcd661fb498e19ecb5ee37fa6f69afad"
+    },
+    "ios/GameViewController.m": {
+      "size": 22733,
+      "sha256": "9f7fef60ab3447c9f38da375c444f6fc4b18ddb3805ec6e423e7311071c84195"
+    },
+    "ios/ios_bridge.h": {
+      "size": 2221,
+      "sha256": "742524b67e6810384b1943b1fe3efb422cde4021bc4d754c7bc1030941423b74"
+    },
+    "ios/ios_bridge.m": {
+      "size": 1557,
+      "sha256": "3308e80ff579f4af47438d106599430dfd5026b8e068708d258f95ab6633d31f"
+    },
+    "core/ac_pal_bridge.h": {
+      "size": 4029,
+      "sha256": "c589f7617571f0ff59ba2cec47445b56680bc782ffc54289b83d47eeccd3d6fc"
+    },
+    "core/ac_pal_bridge.c": {
+      "size": 7117,
+      "sha256": "3e08aba2c02477fd0cf76dc8ebac2771f786bac7e3bdca2de6006ffd51136623"
+    },
+    "rust/ac-ios-runtime/src/lib.rs": {
+      "size": 19417,
+      "sha256": "2fd03415508dc647b9c4323521e1720bd4f6be26e33dea0dd19b79641c476833"
+    },
+    "rust/ac-ios-runtime/src/metal.rs": {
+      "size": 7088,
+      "sha256": "8f33e828cdde5401d651c7a0c6ec45112d446d61bcdb87f1872ce2d32c99ac2b"
+    },
+    "rust/ac-ios-runtime/src/render.rs": {
+      "size": 8399,
+      "sha256": "a8c2c8e0dc7d30f0795b2712a46bd166776e5e1b5aa11841fcb53dba31b622a1"
+    },
+    "rust/ac-ios-runtime/Cargo.toml": {
+      "size": 1491,
+      "sha256": "1a89e87f4741a148214bacb9d2b130d4fb275945aa928c422f0f8ea2ef5f2f2c"
+    },
+    "rust/ac-ios-runtime/examples/bench_sim.rs": {
+      "size": 1183,
+      "sha256": "51a008122628d6fc83c2892827b0b209751326b02cfb388730429d370a986273"
+    },
+    "rust/ac-ios-runtime/examples/bench_render.rs": {
+      "size": 2276,
+      "sha256": "ac538a8546fddaf6795e7ba89f99547a63f0c230503cb68ab12368c05d866e2d"
+    },
+    "rust/target/aarch64-apple-ios/release/libac_ios_runtime.a": {
+      "size": 51412568,
+      "sha256": "7f3e71900ea3cc6e8043f96db6ad1c7022adac71d89a0f1f692d82e66173b565"
+    },
+    "artifacts/ac_pal_bridge.arm64.o": {
+      "size": 19600,
+      "sha256": "46eaef497801cd6e14f0e35ebfa416332f4bc0f7e6419f9ff17ab0ddfaab1125"
+    },
+    "artifacts/IOS_STATICLIB_MANIFEST.json": {
+      "size": 1177,
+      "sha256": "46dbdce7e4bfeb13b5fa5411760f7e6009e31e08c28dc34058ec047387a7a34d"
+    },
+    "artifacts/NATIVE_OBJECT_MANIFEST.json": {
+      "size": 519,
+      "sha256": "a9414e58c11900b13990badee8b57abbac030a2de5978fd22a648e3d6e065968"
+    },
+    "scripts/build_ios.sh": {
+      "size": 4759,
+      "sha256": "3e9d26056da12fbc1ae54ef1722dbe6930b767cee6b8436d3c9c192c3e306cc9"
+    },
+    "scripts/verify_ios_project.py": {
+      "size": 5436,
+      "sha256": "c0ed7c81bb3599ccb9c000b7daaf508f1d6b7ff6cc8c4a68cba295712fac3fc7"
+    },
+    "scripts/verify_staticlib_hash.py": {
+      "size": 792,
+      "sha256": "02817964d3488fa867815515043e4afb2db26ee294e0af0ddd29c520f5f5ece2"
+    },
+    "scripts/inspect_ios_archive.py": {
+      "size": 2400,
+      "sha256": "067b7eaaf8fef79c337f1a7764561e3f89e748cbb8e9ff0a37acd9e4776d0722"
+    },
+    "scripts/audit_ios_link_inputs.py": {
+      "size": 2267,
+      "sha256": "90014b83839fef9f53d7cbf60f947af09b601ee4e1e769015a2f55c7993acf8a"
+    },
+    "scripts/audit_ipa.py": {
+      "size": 3970,
+      "sha256": "65089c62cde8e1dd3e7d1f070033d8e31fd6a685726b4451f8f689e318bbfac0"
+    },
+    "phase5/BUILD_READINESS_REPORT.md": {
+      "size": 8546,
+      "sha256": "d81ac99d3461efa070d24f9493532b200db1ada745f399a8ff4bc9b77752d1f4"
+    },
+    "docs/BUILD_IOS.md": {
+      "size": 3043,
+      "sha256": "daf0a5cdea8b912853c213b893ea1766ca09101b8c13d89e11f27d749ffa683b"
+    },
+    "phase3/shots/magione_lotus.png": {
+      "size": 992742,
+      "sha256": "be1483d611674bb45ee142e76da5d2d1c33c1a1b84d65daf03a0187c324059da"
+    },
+    "docs/IPA_ROUTES.md": {
+      "size": 4765,
+      "sha256": "d421ee461323153bc0ee12086511cf0ad78716a93ed453b11baa9a525b4e5cba"
+    },
+    ".github/workflows/build-unsigned-ios.yml": {
+      "size": 4089,
+      "sha256": "ad7fdd27dfb497de4df4e3c0da349cf3146fafe1b48a5b1d0277035c1c8a14cb"
+    },
+    "scripts/audit_unsigned_ipa.py": {
+      "size": 2817,
+      "sha256": "f1602e8783effae166f656915b738db953ef58d7ba65983d5f47e0699c428de9"
+    },
+    "scripts/verify_workflow_refs.py": {
+      "size": 2104,
+      "sha256": "ea1a5dad8d842436bb92db1ae99d70d860806936831761bdafae177c235bf168"
+    },
+    "scripts/prepush_audit.py": {
+      "size": 5888,
+      "sha256": "a9829db2ea383dd15dbfc355576fb5101cfdcb5f8bd360dc0e26c12944db0805"
+    },
+    "scripts/fetch_gha_result.py": {
+      "size": 5049,
+      "sha256": "10dde1283b7db015544946d6510053f5523b89330942087b2ac7cdd171133525"
+    },
+    "docs/THIRD_PARTY.md": {
+      "size": 1436,
+      "sha256": "e36df9336fa929a088418e09e6b956f19385d4cbb87e8077ab94aeed86102778"
+    },
+    "phase6/PREP_REPORT.md": {
+      "size": 3328,
+      "sha256": "f3df3c79ff3a0228ec4b67cca27c23c801f4d43e716389714439e5cacc1d5c11"
+    }
+  }
+}

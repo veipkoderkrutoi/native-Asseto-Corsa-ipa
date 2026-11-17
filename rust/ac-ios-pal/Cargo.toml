@@ -1,0 +1,10 @@
+[package]
+name = "ac-ios-pal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Platform abstraction traits for the Assetto Corsa native iOS port prototype"
+
+[lib]
+crate-type = ["rlib"]

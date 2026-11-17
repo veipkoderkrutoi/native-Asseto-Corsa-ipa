@@ -1,0 +1,15 @@
+[package]
+name = "rustyac-physics"
+description = "rustyAC physics: swappable systems with a Vanilla (1:1 Assetto Corsa) implementation each"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+# A 1:1 port of Assetto Corsa's car physics (acs.exe, Kunos Simulazioni); see LICENSING.md.
+license = "GPL-3.0-or-later"
+
+[dependencies]
+rustyac-math = { path = "../rustyac-math" }
+rustyac-ode = { path = "../rustyac-ode" }
+# kn5 models: a track's physics meshes and helper nodes
+rustyac-content = { path = "../rustyac-content" }

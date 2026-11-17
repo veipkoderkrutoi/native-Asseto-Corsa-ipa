@@ -1,0 +1,75 @@
+[package]
+name = "rustyac-render"
+description = "rustyAC: Assetto Corsa's renderer. Direct3D 11 through the `windows` crate, driven by a 1:1 port of the game's kgl layer, GraphicsManager, materials, scene graph, PvsProcessor, shadow cascades, lighting and sky. It loads the game's own compiled shaders and textures from the player's install at run time and ships none of them."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[dependencies]
+# AC's own sinf / cosf / tanf / powf (MSVCR120): matrices and lighting must give AC's numbers
+rustyac-math = { path = "../rustyac-math" }
+# the port of INIReader (plain files and data.acd) and the car's state
+rustyac-physics = { path = "../rustyac-physics" }
+# kn5 models: nodes, meshes, materials, textures
+rustyac-content = { path = "../rustyac-content" }
+# AC's widgets and HUD objects: this crate is their painter on Direct3D
+rustyac-gui = { path = "../rustyac-gui" }
+# native wgpu: for now only the per-shader proof of the WGSL translation uses it
+# (Vulkan for SwiftShader, the second software rasterizer of the proof)
+# native wgpu: backend features are selected per target at the end of this file
+# the game's compiled shaders read: YEBIS's variable lists and input layouts, and the WGSL
+# translation of kgl on wgpu (backend-wgpu)
+rustyac-dxbc = { path = "../rustyac-dxbc" }
+# png textures without WIC (kgl on wgpu)
+png = { version = "0.17", optional = true }
+# and jpg (pure Rust, no threads: it also runs in the browser)
+jpeg-decoder = { version = "0.3.2", default-features = false, optional = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[dev-dependencies]
+# the proof prints wgpu's and the D3D12 debug layer's messages (already in the lock file through wgpu)
+log = "0.4"
+
+[features]
+wgpu = ["dep:wgpu"]
+# kgl on wgpu instead of Direct3D 11 (kgl_wgpu.rs): the same renderer above it
+backend-wgpu = ["wgpu", "dep:png", "dep:jpeg-decoder"]
+
+[[example]]
+name = "shader_proof"
+required-features = ["wgpu"]
+
+# Target-specific wgpu backends: iOS has no DX12/Vulkan, it uses Metal.
+# The UIKit host creates the device from a CAMetalLayer and calls Kgl::give_device().
+[target.'cfg(not(target_os = "ios"))'.dependencies.wgpu]
+version = "=30.0.1"
+default-features = false
+features = ["dx12", "vulkan", "wgsl"]
+optional = true
+
+[target.'cfg(target_os = "ios")'.dependencies.wgpu]
+version = "=30.0.1"
+default-features = false
+features = ["metal", "wgsl"]
+optional = true

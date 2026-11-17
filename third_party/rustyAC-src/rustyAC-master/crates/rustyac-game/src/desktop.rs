@@ -1,0 +1,3057 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! `rustyac.exe`: see `docs/game/first_drive.md`.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use rustyac_game::autodrive::AutoDriver;
+use rustyac_game::cli::Options;
+use rustyac_game::input::bindings::{Bindings, KEY_PLAIN_ABS, KEY_PLAIN_BIAS_DN, KEY_PLAIN_BIAS_UP, KEY_PLAIN_TC};
+use rustyac_game::input::keyboard::KeyboardCarControl;
+use rustyac_game::input::pad::XInput;
+use rustyac_game::input::wheel::WheelDevice;
+use rustyac_game::input::LiveSource;
+use rustyac_game::input_file::{event, InputFile, InputWriter, SimSetup, StepInput};
+use rustyac_game::audio::{AudioSink, Feed, GameAudio};
+use rustyac_game::physics_thread::{self, LoopConfig, Recorder, Shared, StepSink, Timing};
+use rustyac_game::render::hud::HudInfo;
+use rustyac_game::render::models::ModelOptions;
+use rustyac_game::render::onboard_free::{self, HelicopterCamera, OrbitInput, ShotCamera};
+use rustyac_game::render::scene::{free_camera, CameraFrame, CameraMode, CarShape, DrivingCamera, MouseCamera, MouseCameraInput, StartCamera};
+use rustyac_game::render::ac::{AcOptions, AcRenderer, GraphicsPreset};
+use rustyac_game::ac_replay::{ReplayKey, ReplayRig};
+use rustyac_game::ghost::{GhostOptions, GhostRig};
+use rustyac_game::telemetry::TelemetryRig;
+use rustyac_physics::replay::ReplayEvent;
+use rustyac_game::render::{box_downscale, write_png, DebugRenderer, Picture};
+use rustyac_game::shm::{SharedMemory, ShmSink};
+use rustyac_game::sim::{DriverSource, GameSim, NobodySource, ReplaySource, SpawnSequence};
+use rustyac_game::focus::{Focus, FocusCommand};
+use rustyac_game::view::CarView;
+use rustyac_game::window::{Event, MouseAction, Window};
+
+/// rustyAC's own keys for its own displays, on keys the game does not use: F10 its panels and
+/// numbers, F12 its frame-rate counter (the game's key handler has an empty case for F12).
+const KEY_DEBUG_HUD: i32 = 0x79;
+const KEY_FPS_COUNTER: i32 = 0x7b;
+/// The game's fixed keys: F8 the screenshot, and with Ctrl the command "Mouse Force Hide".
+const KEY_SCREENSHOT: i32 = 0x77;
+use windows::Win32::System::Console::SetConsoleCtrlHandler;
+use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED};
+
+/// Ctrl+C was pressed or the console is being closed: every loop ends, so that the force
+/// feedback is taken off, the recording is finished and the shared memory says "off".
+static STOP: AtomicBool = AtomicBool::new(false);
+/// The program has finished its work (the console handler waits for this before it lets
+/// Windows end the process).
+static DONE: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "system" fn console_handler(_kind: u32) -> windows::core::BOOL {
+    STOP.store(true, Ordering::Relaxed);
+    // when the console is closed the process dies as soon as this returns: give the loops
+    // a moment to end tidily
+    for _ in 0..300 {
+        if DONE.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true.into()
+}
+
+/// The car and session of a live drive: from the command line, and the conditions of the
+/// game's own last session (race.ini) unless that is switched off.
+fn live_setup(options: &Options) -> Result<SimSetup, String> {
+    // the track by the name the user gave it, the layout by --layout or race.ini's CONFIG_TRACK
+    let (mut track, mut layout) = (String::new(), String::new());
+    if let Some(name) = &options.track {
+        let race = rustyac_game::conditions::race_track(options);
+        let found = rustyac_game::sim::resolve_track(name, options.layout.as_deref(), race.as_ref())?;
+        for note in &found.notes {
+            println!("{note}");
+        }
+        // by name when it is one of the game's own folder (a recording then replays on
+        // another PC), by path otherwise
+        let in_game = rustyac_content::install::ac_root().is_some_and(|root| root.join("content").join("tracks").join(&found.entry.track) == found.entry.folder);
+        track = if in_game { found.entry.track.clone() } else { found.entry.folder.display().to_string() };
+        layout = found.entry.layout;
+    }
+    let mut setup = SimSetup {
+        car: options.car.clone(),
+        // (the aids: `conditions::apply` below)
+        auto_clutch: true,
+        track,
+        layout,
+        track_objects: true,
+        session_transfer: true,
+        spawn: options.spawn.clone(),
+        session_starts_at_spawn: true,
+        drs_zones: true,
+        ai_record: options.ai_record.is_some(),
+        ..SimSetup::default()
+    };
+    // normal play: the picture's rand() starts from the clock, as the game's does (Sim::Sim
+    // and CameraFacing seed it from the time); pictures and unattended runs keep a fixed start
+    if let Some(seed) = options.render_seed {
+        setup.render_seed = seed;
+    } else if options.screenshot.is_none() && !options.headless {
+        setup.render_seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u32).unwrap_or(1);
+    }
+    // Task 24: the other cars
+    if let Some(count) = options.cars {
+        let drive = if setup.track.is_empty() { rustyac_game::input_file::OpponentDrive::Parked } else { rustyac_game::input_file::OpponentDrive::Auto };
+        for _ in 1..count {
+            setup.opponents.push(rustyac_game::input_file::Opponent { car: options.car.clone(), skin: String::new(), drive: drive.clone(), place: None });
+        }
+    }
+    // Task 27: AC's AI drivers. `--ai-level` / `--ai-aggression` as race.ini's AI_LEVEL /
+    // AI_AGGRESSION become a driver's basePush and aggression
+    let ai_push = (options.ai_level.unwrap_or(100.0) * 0.01).clamp(0.0, 1.0);
+    let ai_aggression = (options.ai_aggression.unwrap_or(0.0) * 0.01).clamp(0.0, 1.0) * 0.95;
+    if let Some(count) = options.ai_cars {
+        for _ in 1..count {
+            setup.opponents.push(rustyac_game::input_file::Opponent { car: options.car.clone(), skin: String::new(), drive: rustyac_game::input_file::OpponentDrive::Ai { push: ai_push, aggression: ai_aggression }, place: None });
+        }
+    }
+    for text in &options.opponents {
+        let mut opponent = rustyac_game::input_file::Opponent::parse(text)?;
+        if text.to_ascii_lowercase().ends_with(":ai") {
+            opponent.drive = rustyac_game::input_file::OpponentDrive::Ai { push: ai_push, aggression: ai_aggression };
+        }
+        if let rustyac_game::input_file::OpponentDrive::Recorded(file) = &mut opponent.drive {
+            // (the whole path goes into a recording's header: a replay finds the file from anywhere)
+            if !file.is_file() {
+                return Err(format!("--opponent {text}: {} is not a file", file.display()));
+            }
+            *file = std::path::absolute(&*file).map_err(|e| e.to_string())?;
+        }
+        setup.opponents.push(opponent);
+    }
+    setup.physics_threads = options.physics_threads;
+    // the device the bindings name decides one aid (a pad has no clutch pedal)
+    let input_method = Bindings::load(options, &mut Vec::new()).input_method;
+    let notes = rustyac_game::conditions::apply(options, &mut setup, &input_method)?;
+    // Task 27: the AI drivers' session
+    let ai_cars = setup.opponents.iter().any(|opponent| matches!(opponent.drive, rustyac_game::input_file::OpponentDrive::Ai { .. }));
+    if ai_cars && setup.session.session_type.is_none() && !setup.track.is_empty() {
+        // no session of race.ini: a race from the grid, or practice from the pit boxes
+        if !options.spawn_given {
+            setup.spawn = "start".to_string();
+        }
+        setup.session.session_type = Some(if setup.spawn == "pit" { 1 } else { 3 });
+    }
+    if let Some(laps) = options.ai_laps {
+        setup.ai.laps = laps;
+    }
+    if let Some(seconds) = options.race_start_in {
+        setup.ai.start_delay_ms = seconds * 1000.0;
+    }
+    if let Some(seconds) = options.ai_at {
+        setup.ai.hand_over_step = (seconds / 0.003).round() as i64;
+    }
+    // Task 28: the referee. race.ini's sessions (conditions::apply), or --sessions, or a race
+    // of --ai-laps laps when AI drivers race without a race.ini session
+    setup.esc_start = esc_start(options);
+    if options.no_referee {
+        setup.referee = None;
+    } else if !setup.track.is_empty() {
+        let cars = 1 + setup.opponents.len();
+        let penalties = options.penalties.unwrap_or(setup.session.penalties);
+        let made = match &options.sessions {
+            Some(list) => Some(rustyac_game::conditions::sessions_from_list(list, cars, penalties, options.jump_start, setup.env.base_pit_penalty_laps)?),
+            None if setup.referee.is_none() && ai_cars && setup.session.session_type == Some(3) => Some(rustyac_game::conditions::sessions_from_list(&format!("r{}", setup.ai.laps.max(1)), cars, penalties, options.jump_start, setup.env.base_pit_penalty_laps)?),
+            None => None,
+        };
+        if let Some(sessions) = made {
+            let first = &sessions.sessions[0];
+            setup.session.session_type = Some(first.session_type);
+            if !options.spawn_given {
+                setup.spawn = if first.spawn_set == "START" { "start" } else { "pit" }.to_string();
+            }
+            if let Some(mode) = sessions.jump_start_penalty_mode {
+                setup.env.jump_start_penalty_mode = mode;
+            }
+            setup.env.allowed_tyres_out = sessions.allowed_tyres_out();
+            let wind_base = setup.referee.as_ref().and_then(|referee| referee.wind_base);
+            setup.referee = Some(rustyac_game::input_file::RefereeHeader { sessions, over_time_mult: rustyac_game::conditions::over_time_mult(), first_start_delay_ms: 20000.0, next_start_delay_ms: 10000.0, seed: 0, wind_base, driver_names: Vec::new(), pit: (!options.no_pit_stop).then(|| rustyac_game::conditions::pit_header((0, 0), setup.session.setup_file.as_deref(), rustyac_game::conditions::keyboard_driver(options, &input_method))), game_mode: Default::default() });
+        }
+        // Task 28b: --pit-window <open>,<close>
+        if let (Some(window), Some(pit)) = (options.pit_window, setup.referee.as_mut().and_then(|referee| referee.pit.as_mut())) {
+            pit.window = window;
+        }
+        if let Some(referee) = &mut setup.referee {
+            if let Some(penalties) = options.penalties {
+                referee.sessions.penalties_enabled = penalties;
+                setup.env.allowed_tyres_out = referee.sessions.allowed_tyres_out();
+            }
+            // Task 45: DriftMode's constructor lets the player's car have two tyres out
+            if referee.sessions.sessions.first().is_some_and(|s| s.session_type == rustyac_physics::race::manager::SESSION_DRIFT) {
+                setup.env.allowed_tyres_out = 2;
+            }
+            if let Some(seconds) = options.race_start_in {
+                referee.first_start_delay_ms = (seconds * 1000.0) as f32;
+                referee.next_start_delay_ms = (seconds * 1000.0) as f32;
+            } else if esc_start(options) {
+                // the session begins in the ESC menu: `startRace` waits for its "Drive"
+                referee.first_start_delay_ms = -1.0;
+                referee.next_start_delay_ms = -1.0;
+            }
+            // (a live drive draws anew every time; pictures and unattended runs do not)
+            referee.seed = match options.ai_seed {
+                Some(seed) => seed.wrapping_add(28_000),
+                None if options.screenshot.is_none() && !options.headless => std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u32).unwrap_or(0),
+                None => 28_000,
+            };
+        }
+    }
+    // (a live drive draws anew every time, as the game's rand() starts from the clock)
+    setup.ai.seed = match options.ai_seed {
+        Some(seed) => seed,
+        None if (ai_cars || setup.ai.player || options.ai_at.is_some()) && options.screenshot.is_none() && !options.headless => {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u32).unwrap_or(0)
+        }
+        None => 0,
+    };
+    for note in notes {
+        println!("{note}");
+    }
+    if !setup.opponents.is_empty() {
+        println!(
+            "{} other car(s), drawn and heard as the game draws and plays them. Ctrl+{} / Ctrl+{}: the camera to the car ahead / behind on the track, Ctrl+{} or F4: back to yours",
+            setup.opponents.len(),
+            rustyac_game::input::bindings::key_name(0x63),
+            rustyac_game::input::bindings::key_name(0x61),
+            rustyac_game::input::bindings::key_name(0x62)
+        );
+    }
+    Ok(setup)
+}
+
+/// Puts the track's and the car's 3D models on the graphics card, where there are any. A
+/// model that cannot be loaded is a line on the console, not an end: the grid and the boxes
+/// are still there.
+fn load_models(renderer: &mut DebugRenderer, options: &Options, info: &rustyac_game::sim::CarInfo) {
+    let model_options = ModelOptions { texture_size: options.texture_size, flat: options.no_textures, ..ModelOptions::default() };
+    let megabytes = |bytes: u64| bytes as f64 / 1_048_576.0;
+    if let Some(folder) = &info.track_folder {
+        let loaded = rustyac_content::TrackFiles::find_lenient(folder, &info.track_layout).and_then(|files| {
+            // (a model file that is not there is left out, as in the physics)
+            let models: Vec<_> = files.models.iter().filter(|m| m.file.is_file()).collect();
+            let paths: Vec<_> = models.iter().map(|m| m.file.clone()).collect();
+            let placements: Vec<_> = models.iter().map(|m| rustyac_game::render::models::Placement { position: m.position, rotation: m.rotation }).collect();
+            renderer.load_track(&paths, &placements, &model_options)
+        });
+        match loaded {
+            Ok(stats) => {
+                println!(
+                    "track models: {} files, {} meshes, {} triangles ({:.0} MB), {} textures ({:.0} MB, longest side {}), {} materials in flat colour, loaded in {:.2} s",
+                    stats.files,
+                    stats.meshes,
+                    stats.triangles,
+                    megabytes(stats.geometry_bytes),
+                    stats.textures,
+                    megabytes(stats.texture_bytes),
+                    if stats.texture_size == 0 { "as stored".to_string() } else { format!("{} px", stats.texture_size) },
+                    stats.flat_materials,
+                    stats.load_seconds
+                );
+                for note in &stats.notes {
+                    println!("  {note}");
+                }
+            }
+            Err(message) => eprintln!("WARNING: the track's models were not loaded ({message}): the grid is drawn instead"),
+        }
+    }
+    renderer.boxes = options.boxes;
+    if !options.boxes {
+        match rustyac_game::sim::find_car_model(&info.name, &info.data_path) {
+            Some(file) => match renderer.load_car(&file, &model_options) {
+                Ok(stats) => {
+                    println!(
+                        "car model {}: {} meshes, {} triangles, {} textures ({:.0} MB), {} materials in flat colour, loaded in {:.2} s",
+                        file.display(),
+                        stats.meshes,
+                        stats.triangles,
+                        stats.textures,
+                        megabytes(stats.texture_bytes),
+                        stats.flat_materials,
+                        stats.load_seconds
+                    );
+                    for note in &stats.notes {
+                        println!("  {note}");
+                    }
+                }
+                Err(message) => eprintln!("WARNING: the car's model was not loaded ({message}): boxes are drawn instead"),
+            },
+            None => println!("no 3D model of {} in Assetto Corsa's folder: the car is drawn as boxes", info.name),
+        }
+    }
+}
+
+/// AC's own renderer with the track and the car loaded.
+fn make_ac(options: &Options, width: u32, height: u32, info: &rustyac_game::sim::CarInfo, others: &[rustyac_game::sim::CarInfo]) -> Result<AcRenderer, String> {
+    let game = rustyac_content::install::ac_root().ok_or_else(rustyac_content::install::not_found_hint)?;
+    let mut skin = options.skin.clone();
+    let race = match (&options.race_ini_file, options.race_ini) {
+        (Some(file), _) => Some(file.clone()),
+        (None, Some(false)) => None,
+        (None, _) => rustyac_game::conditions::race_ini_path().filter(|p| p.is_file()),
+    };
+    let assists_file = race.as_ref().map(|p| p.with_file_name("assists.ini")).filter(|p| p.is_file());
+    let race_reader = race.as_ref().and_then(|p| rustyac_physics::data::ini::IniReader::load_race(p).ok());
+    // the sun, the weather and the groove of race.ini
+    let look = rustyac_game::render::ac::RaceLook::of(race_reader.as_ref());
+    // a race start: --start-lights <seconds>, or race.ini's race
+    let start_lights = options.start_lights.or(look.start_lights());
+    let rustyac_game::render::ac::RaceLook { mut sun_angle, mut sun_animation, mut weather, groove, session_type } = look;
+    if let Some(ini) = &race_reader {
+        if skin.is_none() {
+            let name = ini.get_string("CAR_0", "SKIN");
+            if !name.is_empty() {
+                skin = Some(name);
+            }
+        }
+    }
+    // DrivingAssistManager::DrivingAssistManager 0x1400fbd90: assists.ini [ASSISTS] IDEAL_LINE,
+    // beside the race.ini (not with --no-race-ini); --ideal-line / --no-ideal-line come first
+    let mut ideal_line = false;
+    if let Some(assists) = assists_file.and_then(|p| rustyac_physics::data::ini::IniReader::load(&p).ok()) {
+        ideal_line = assists.get_int("ASSISTS", "IDEAL_LINE").unwrap_or(0) != 0;
+    }
+    if let Some(on) = options.ideal_line {
+        ideal_line = on;
+    }
+    rustyac_game::shm::IDEAL_LINE_ON.store(ideal_line, Ordering::Relaxed);
+    if let Some(sun) = options.sun {
+        sun_angle = sun;
+    }
+    // a session of race.ini with other cars: the player's skin as the game makes it
+    if options.skin.is_none() && info.skin.is_some() {
+        skin = info.skin.clone();
+    }
+    if let Some(name) = &options.weather {
+        weather = name.clone();
+    }
+    if let (Some(mult), Some((time_mult, _))) = (options.time_mult, &mut sun_animation) {
+        *time_mult = mult;
+    }
+    // --no-a2c (NOT Assetto Corsa): before the device makes its blend states
+    rustyac_render::kgl::EXPERIMENT_NO_ALPHA_TO_COVERAGE.store(options.no_a2c, Ordering::Relaxed);
+    let mut renderer = AcRenderer::new(width, height, AcOptions { warp: options.warp, gpu_log: options.gpu_log.clone(), game: game.clone(), sun_angle, weather, skin: None, video_exact: options.video_ini_exact, cube_faces: options.cube_faces, mirror_size: options.mirror_size, sun_animation, groove, mirror_hq: options.mirror_hq, world_detail: options.world_detail, render_seed: info.render_seed, cube_size: options.cube_size, ideal_line, start_lights, session_type: session_type.unwrap_or(if options.spawn == "hotlap" { 4 } else { 1 }), video_ini: options.video_ini.clone(), preset: options.graphics.as_deref().map(GraphicsPreset::from_name).transpose()?, aa_samples: options.aa_samples, post: options.post, fxaa: options.fxaa, motion_blur: options.motion_blur, hdr_levels: options.hdr_levels, own_dir: Some(rustyac_game::conditions::own_dir(options)), cars: 1 + others.len() })?;
+    for note in &renderer.notes {
+        println!("{note}");
+    }
+    if let Some(folder) = &info.track_folder {
+        println!("{}", renderer.load_track(folder, &info.track_layout)?);
+    }
+    // RUSTYAC_DIAG_DRAW_ONE_CAR=1 (a diagnosis switch, NOT Assetto Corsa): the other cars are in
+    // the physics but not in the picture, to tell what their physics costs the frame rate from
+    // what drawing them costs
+    let others: &[rustyac_game::sim::CarInfo] = if std::env::var_os("RUSTYAC_DIAG_DRAW_ONE_CAR").is_some_and(|v| v == "1") {
+        println!("RUSTYAC_DIAG_DRAW_ONE_CAR=1: NOT Assetto Corsa, a diagnosis switch: only your car is drawn");
+        &[]
+    } else {
+        others
+    };
+    // RaceManager::carsToBeLoaded, before the first car is made
+    renderer.set_cars_to_be_loaded(1 + others.len());
+    // Sim::addCar for every car in the order of the physics: the player's first. A car's folder
+    // in the game holds its models (its data may come from elsewhere).
+    let load = |renderer: &mut AcRenderer, info: &rustyac_game::sim::CarInfo, skin: Option<String>| -> Result<bool, String> {
+        let loaded = renderer.load_car_info(info, skin)?;
+        if let Some(summary) = &loaded {
+            println!("{summary}");
+        }
+        Ok(loaded.is_some())
+    };
+    if load(&mut renderer, info, skin)? {
+        for (number, other) in others.iter().enumerate() {
+            // (the cars of the picture are numbered as the cars of the physics: one that cannot
+            // be drawn would put every later one on the wrong car)
+            if !load(&mut renderer, other, other.skin.clone())? {
+                return Err(format!("no 3D model of {} (car {}) in Assetto Corsa's folder", other.name, number + 1));
+            }
+        }
+        let crew = renderer.init_pit_crew();
+        if !crew.is_empty() {
+            println!("{crew}");
+        }
+    } else {
+        println!("no 3D model of {} in Assetto Corsa's folder: no car is drawn", info.name);
+    }
+    renderer.finish_loading()?;
+    // Task 29: AC's GUI and HUD (Sim::Sim makes them once the cars are there)
+    if !options.no_gui && !options.no_hud {
+        let ini = |car: &rustyac_game::sim::CarInfo, section: &str, key: &str| rustyac_physics::data::ini::IniReader::load(&car.data_path.join("car.ini")).ok().and_then(|ini| ini.get_float(section, key).ok()).unwrap_or(0.0);
+        let cars: Vec<&rustyac_game::sim::CarInfo> = std::iter::once(info).chain(others).collect();
+        let folders: Vec<String> = cars.iter().map(|car| car.name.clone()).collect();
+        let setup = rustyac_game::render::gui::GuiSetup {
+            cars: rustyac_game::render::gui::car_names(&game, race_reader.as_ref(), &folders),
+            steer_locks: cars.iter().map(|car| ini(car, "CONTROLS", "STEER_LOCK")).collect(),
+            fuel_light_min_liters: ini(info, "GRAPHICS", "FUEL_LIGHT_MIN_LITERS"),
+            session_type: options.sessions.as_deref().and_then(|list| match list.trim().chars().next() {
+                Some('p') => Some(1),
+                Some('q') => Some(2),
+                Some('r') => Some(3),
+                _ => None,
+            }).or(session_type).unwrap_or(if options.spawn == "hotlap" { 4 } else { 1 }),
+            penalties: race_reader.as_ref().is_some_and(|ini| ini.get_int("RACE", "PENALTIES").unwrap_or(0) != 0),
+            session_count: match &options.sessions {
+                Some(list) => list.split(',').filter(|s| !s.trim().is_empty()).count() as u32,
+                None => race_reader.as_ref().map_or(1, |ini| (0..32).take_while(|n| ini.has_section(&format!("SESSION_{n}"))).count().max(1) as u32),
+            },
+            online: options.join.is_some() || options.online_session,
+            replay: !options.no_ac_replay && options.replay.is_none(),
+            player_data: info.data_path.clone(),
+            skins: cars
+                .iter()
+                .enumerate()
+                .map(|(i, car)| {
+                    // (as the cars are drawn: the skin asked for, else the first of the folder)
+                    let asked = if i == 0 { options.skin.clone() } else { car.skin.clone() };
+                    asked.unwrap_or_else(|| {
+                        let mut skins: Vec<String> = std::fs::read_dir(game.join("content/cars").join(&car.name).join("skins")).map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+                        skins.sort();
+                        skins.first().cloned().unwrap_or_default()
+                    })
+                })
+                .collect(),
+            // CarAvatar::initCommon 0x1400d56e0: car.ini [INFO] SHORT_NAME, else the screen name
+            short_names: cars
+                .iter()
+                .map(|car| {
+                    let ini = rustyac_physics::data::ini::IniReader::load(&car.data_path.join("car.ini")).ok();
+                    let key = |name: &str| ini.as_ref().filter(|ini| ini.has_key("INFO", name)).map(|ini| ini.get_string("INFO", name)).filter(|text| !text.is_empty());
+                    key("SHORT_NAME").or_else(|| key("SCREEN_NAME")).unwrap_or_else(|| car.name.clone())
+                })
+                .collect(),
+            cfg_dir: cfg_dir(options),
+            // (not over a recorded drive: its jobs are the recording's)
+            setup_snapshot: if options.replay.is_some() { None } else { info.setup.as_deref().cloned() },
+            pit_page: if options.replay.is_some() { None } else { info.pit_page.as_deref().cloned() },
+            pit_compounds: info.pit_compounds.clone(),
+            telemetry_car: info.telemetry,
+            car_physics: info.car_physics,
+            engineer_masses: info.engineer_masses,
+            wings: info.wings.clone(),
+            suspension: info.suspension,
+            setups_dir: options.setups_dir.clone().unwrap_or_else(|| rustyac_game::conditions::own_dir(options).join("setups")),
+            documents_setups: (!options.no_ac_setups).then(|| rustyac_game::conditions::documents_folder().map(|folder| folder.join("setups"))).flatten(),
+            track_name: info.track_folder.as_ref().and_then(|folder| folder.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+            track_layout: info.track_layout.clone(),
+            esc_start: esc_start(options),
+            triple_screens: renderer.triple_screens(),
+            vr: renderer.vr(),
+        open_vr: renderer.open_vr_values(),
+            ai_drive: options.ai_drive,
+            // Task 33: the ESC menu's page "Telemetry": the recorder's folder (none: no recorder)
+            telemetry_folder: telemetry_folder(options, true).filter(|_| !options.online_session),
+            max_gear: rustyac_game::input::ini::ControlsIni::load_car_data(&info.data_path.join("drivetrain.ini")).map_or(0, |ini| ini.get_int("GEARS", "COUNT")),
+            fixed_setup: options.sessions.is_none() && !options.no_referee && race_reader.as_ref().is_some_and(|ini| ini.get_int("RACE", "FIXED_SETUP").unwrap_or(0) > 0),
+            out_dir: referee_out(options).unwrap_or_else(|| PathBuf::from("out")),
+            documents_cfg: rustyac_game::conditions::documents_folder().map(|folder| folder.join("cfg")),
+            data_paths: cars.iter().map(|car| car.data_path.clone()).collect(),
+            dev_apps: rustyac_game::render::gui::dev_apps_enabled(&game, options.dev_apps),
+            hidden_apps: &[],
+            language: rustyac_gui::locale::language(rustyac_game::conditions::documents_folder().map(|folder| folder.join("cfg")).as_deref(), options.language.as_deref()),
+            game: game.clone(),
+            python_cars: cars
+                .iter()
+                .enumerate()
+                .map(|(i, car)| rustyac_game::render::gui::PythonCar {
+                    ballast_kg: car.ballast_kg,
+                    restrictor: car.restrictor,
+                    // (only the player's car has a race engineer)
+                    min_height: (i == 0).then_some(car.min_height_m),
+                    ai_controlled: car.ai_controlled,
+                    camera_count: rustyac_game::render::scene::CarShape::of(car).car_cameras.len() as i32,
+                })
+                .collect(),
+            server: rustyac_game::join::target(options).ok().flatten().map(|target| (target.server_name, target.host, target.http_port)),
+        };
+        if let Err(message) = renderer.enable_gui(setup) {
+            eprintln!("WARNING: AC's GUI could not be made ({message}); rustyAC's own display is drawn instead");
+        }
+    }
+    Ok(renderer)
+}
+
+/// The picture: AC's renderer, or the debug view when it was asked for or when AC's renderer
+/// cannot start (no Assetto Corsa folder, no Direct3D 11 …).
+/// The Camera editor's start (car 0's cameras and views), before the apps are made; `--post`
+/// decides whether it is made at all (only with post-processing on, as with YEBIS's camera).
+fn start_camera_editor(renderer: &mut Picture, options: &Options, unix: &str, data: &Path, shape: &CarShape) {
+    // (FormHDR's target spinner starts from the filter's [AUTO_EXPOSURE] TARGET)
+    let target = match renderer {
+        Picture::Ac(r) => r.auto_exposure().map(|(_, [.., target])| target),
+        Picture::Debug(_) => None,
+    };
+    if let Some(gui) = renderer.gui() {
+        if let Some(on) = options.post {
+            gui.gui.sim.replay.post_processing = Some(on);
+        }
+        let mut link = rustyac_game::render::gui_apps::camera_editor_link(unix, data, shape);
+        link.auto_exposure_target = target.unwrap_or(0.0);
+        gui.gui.apps.camera_editor = Some(link);
+    }
+}
+
+fn make_picture(options: &Options, width: u32, height: u32, info: &rustyac_game::sim::CarInfo, others: &[rustyac_game::sim::CarInfo]) -> Result<Picture, String> {
+    if !options.debug_view {
+        match make_ac(options, width, height, info, others) {
+            Ok(renderer) => return Ok(Picture::Ac(Box::new(renderer))),
+            Err(message) => eprintln!("WARNING: Assetto Corsa's renderer could not start ({message}); the debug view is drawn instead"),
+        }
+    }
+    let mut renderer = DebugRenderer::new(width, height)?;
+    load_models(&mut renderer, options, info);
+    Ok(Picture::Debug(Box::new(renderer)))
+}
+
+/// The recorder and the shared memory, as asked for.
+/// The physics thread's hand-over to the sound, if this run has sound: always with a window
+/// (unless `--no-audio`); without one (`--headless`) only when the sound is asked for by one
+/// of its own options, so that a headless run stays silent.
+fn audio_feed(options: &Options, headless: bool) -> Option<Arc<Mutex<Feed>>> {
+    let audio = &options.audio;
+    if audio.off || (headless && audio.wav.is_none() && audio.log.is_none() && !audio.null) {
+        return None;
+    }
+    Some(Arc::new(Mutex::new(if audio.clockless() { Feed::with_grid() } else { Feed::default() })))
+}
+
+use rustyac_game::conditions::cfg_dir;
+
+/// The sound of the car that was built (the engine, the track's sounds, the car's).
+fn start_audio(options: &Options, feed: &Option<Arc<Mutex<Feed>>>, info: &rustyac_game::sim::CarInfo, others: &[rustyac_game::sim::CarInfo]) -> Option<GameAudio> {
+    let mut audio = GameAudio::start_for(&audio_options(options), Arc::clone(feed.as_ref()?), info, others)?;
+    audio.set_focus(options.focus.min(others.len()));
+    Some(audio)
+}
+
+/// The Audio app's files in rustyAC's own cfg folder come before Documents'.
+fn audio_options(options: &Options) -> rustyac_game::audio::AudioOptions {
+    let mut audio_options = options.audio.clone();
+    audio_options.cfg_dir = Some(cfg_dir(options));
+    audio_options
+}
+
+/// Task 28c: the session's replay (AC's `ReplayManager`), shared by the physics thread, which
+/// records, and the window, which plays. A window always has one; a run without a window
+/// only when it is asked to save one. Replays go into rustyAC's own folder: `--replay-dir`,
+/// else `replay` beside rustyac.exe (never one of Assetto Corsa's folders).
+fn replay_rig(options: &Options, window: bool) -> Option<Arc<Mutex<ReplayRig>>> {
+    if options.no_ac_replay || !(window || options.save_replay.is_some()) {
+        return None;
+    }
+    let folder = options.replay_dir.clone().unwrap_or_else(|| rustyac_game::conditions::own_dir(options).join("replay"));
+    // cfg/replay.ini: the player's (read only), else the game's own; none with --no-race-ini,
+    // so that a check does not depend on the player's files (10 minutes at 33 frames a second)
+    let mut ini = None;
+    if options.race_ini != Some(false) {
+        let mut files = Vec::new();
+        if let Some(documents) = rustyac_content::install::documents() {
+            files.push(documents.join("cfg/replay.ini"));
+        }
+        if let Some(game) = rustyac_content::install::ac_root() {
+            files.push(game.join("cfg/replay.ini"));
+        }
+        ini = files.iter().find(|file| file.is_file()).and_then(|file| rustyac_physics::data::ini::IniReader::load(file).ok());
+    }
+    Some(Arc::new(Mutex::new(ReplayRig::new(folder, ini, -16.0, 1))))
+}
+
+/// AC's ghost car, when race.ini's `[GHOST_CAR]` or `--ghost` asks for one
+/// (`RaceManager::initGhostcar`: offline only). Its files live in rustyAC's own folder.
+fn ghost_rig(options: &Options) -> Option<Arc<Mutex<GhostRig>>> {
+    // (a recorded drive played again has a ghost only when the command line asks for one: what
+    // it does must not depend on the player's files)
+    let asked = options.ghost.is_some() || options.ghost_file.is_some();
+    if options.join.is_some() || options.ac_replay.is_some() || (options.replay.is_some() && !asked) {
+        return None;
+    }
+    let mut ghost = GhostOptions::default();
+    let race = match (&options.race_ini_file, options.race_ini) {
+        _ if options.replay.is_some() => None,
+        (Some(file), _) => Some(file.clone()),
+        (None, Some(false)) => None,
+        (None, _) => rustyac_game::conditions::race_ini_path().filter(|p| p.is_file()),
+    };
+    if let Some(ini) = race.and_then(|p| rustyac_physics::data::ini::IniReader::load_race(&p).ok()) {
+        let on = |key: &str| ini.get_int("GHOST_CAR", key).unwrap_or(0) != 0;
+        ghost.recording = on("RECORDING");
+        ghost.playing = on("PLAYING");
+        ghost.load = on("LOAD");
+        ghost.file = Some(ini.get_string("GHOST_CAR", "FILE")).filter(|file| !file.is_empty()).map(PathBuf::from);
+        ghost.seconds_advantage = ini.get_float("GHOST_CAR", "SECONDS_ADVANTAGE").unwrap_or(0.0);
+    }
+    match options.ghost.as_deref() {
+        Some("off") => return None,
+        Some("record") => ghost.recording = true,
+        Some("play") => (ghost.playing, ghost.load) = (true, true),
+        Some("both") => (ghost.recording, ghost.playing, ghost.load) = (true, true, true),
+        _ => {}
+    }
+    if let Some(file) = &options.ghost_file {
+        ghost.file = Some(file.clone());
+        ghost.load = true;
+    }
+    if let Some(seconds) = options.ghost_advantage {
+        ghost.seconds_advantage = seconds;
+    }
+    if !ghost.wanted() {
+        return None;
+    }
+    let folder = options.ghost_dir.clone().unwrap_or_else(|| rustyac_game::conditions::own_dir(options).join("GhostCar"));
+    Some(Arc::new(Mutex::new(GhostRig::new(folder, ghost))))
+}
+
+/// AC's comparative telemetry (`Sim::Sim` makes its recorder for the player's car, offline
+/// or not; rustyAC: never on a server): in a window, and elsewhere when a folder is named.
+fn telemetry_rig(options: &Options, window: bool) -> Option<Arc<Mutex<TelemetryRig>>> {
+    Some(Arc::new(Mutex::new(TelemetryRig::new(telemetry_folder(options, window)?))))
+}
+
+/// Where the telemetry rig keeps its files (none: there is no rig).
+fn telemetry_folder(options: &Options, window: bool) -> Option<PathBuf> {
+    let asked = options.telemetry_dir.is_some();
+    if options.no_telemetry || options.join.is_some() || options.ac_replay.is_some() || ((options.replay.is_some() || !window) && !asked) {
+        return None;
+    }
+    Some(options.telemetry_dir.clone().unwrap_or_else(|| rustyac_game::conditions::own_dir(options).join("ctelemetry")))
+}
+
+/// The physics thread's end of the telemetry: a sample after every step, the file at the end.
+struct TelemetrySink {
+    rig: Arc<Mutex<TelemetryRig>>,
+}
+
+impl StepSink for TelemetrySink {
+    fn after_step(&mut self, sim: &rustyac_game::sim::GameSim, _input: &StepInput) -> Result<(), String> {
+        let mut rig = self.rig.lock().unwrap();
+        if sim.online.is_none() {
+            rig.after_step(sim);
+        }
+        for line in rig.messages.drain(..) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        let mut rig = self.rig.lock().unwrap();
+        rig.shutdown();
+        for line in rig.messages.drain(..) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+}
+
+/// ACSuspension's TempRun: the game's `BrakeSystem::tempRunFile` opens
+/// `TempRuns/<car>@<track>.trun` in its own folder and writes nothing when that folder is not
+/// there (AC ships without it); rustyAC writes the same bytes into its cfg folder's `TempRuns`,
+/// also only when that folder is there, when the run ends.
+struct TempRunSink {
+    folder: PathBuf,
+    file: Option<(String, Vec<u8>)>,
+}
+
+impl StepSink for TempRunSink {
+    fn after_step(&mut self, sim: &GameSim, _input: &StepInput) -> Result<(), String> {
+        let car = &sim.car.car;
+        if let Some((_, bytes)) = &car.temp_run {
+            let track = car.track.as_ref().map_or(String::new(), |t| t.name.clone());
+            self.file = Some((format!("{}@{track}.trun", sim.setup.car), bytes.clone()));
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        let Some((name, bytes)) = self.file.take() else { return Ok(()) };
+        let path = self.folder.join(&name);
+        if !self.folder.is_dir() {
+            println!("TempRun: {} is not there, so nothing is written (as in the game)", self.folder.display());
+        } else if let Err(e) = rustyac_content::guard::write(&path, &bytes) {
+            eprintln!("WARNING: the TempRun was not saved: {}: {e}", path.display());
+        } else {
+            println!("TempRun: {} ({} bytes; the game would write it into its own TempRuns folder)", path.display(), bytes.len());
+        }
+        Ok(())
+    }
+}
+
+/// The physics thread's end of the ghost car: the recorder's handlers after every step, and
+/// the file when the run ends.
+struct GhostSink {
+    rig: Arc<Mutex<GhostRig>>,
+}
+
+impl StepSink for GhostSink {
+    fn after_step(&mut self, sim: &rustyac_game::sim::GameSim, _input: &StepInput) -> Result<(), String> {
+        let mut rig = self.rig.lock().unwrap();
+        if sim.online.is_none() {
+            rig.after_step(sim);
+        }
+        for line in rig.messages.drain(..) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        let mut rig = self.rig.lock().unwrap();
+        rig.shutdown();
+        for line in rig.messages.drain(..) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+}
+
+/// The physics thread's end of the replay: a frame of every car whenever the recording
+/// interval has passed (`ReplayManager::onStepCompleted`), and the save at the program's end.
+struct ReplaySink {
+    rig: Arc<Mutex<ReplayRig>>,
+    save: Option<PathBuf>,
+}
+
+impl StepSink for ReplaySink {
+    fn after_step(&mut self, sim: &rustyac_game::sim::GameSim, _input: &StepInput) -> Result<(), String> {
+        let mut rig = self.rig.lock().unwrap();
+        if !rig.in_replay_mode() {
+            rig.after_step(sim);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        let mut rig = self.rig.lock().unwrap();
+        match &self.save {
+            Some(path) => match rig.save_to(path) {
+                Ok(bytes) => println!("replay: {} ({bytes} bytes, {} frames)", path.display(), rig.manager.as_ref().map_or(0, |m| m.recorded_frames)),
+                Err(message) => eprintln!("WARNING: the replay was not saved: {message}"),
+            },
+            None => rig.shutdown(),
+        }
+        for line in rig.messages.drain(..) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+}
+
+/// A key of a replay that shows. The answer: the key was the replay's.
+#[allow(clippy::too_many_arguments)]
+fn ac_replay_key(rig: &Arc<Mutex<ReplayRig>>, shared: &Shared, bindings: &Bindings, key: i32, ctrl: bool, alt: bool, online: bool) -> bool {
+    let mut rig = rig.lock().unwrap();
+    let command = if ctrl {
+        match key {
+            _ if key == bindings.key_ffwd => Some(ReplayKey::FastForward),
+            _ if key == bindings.key_slowmo => Some(ReplayKey::SlowMotion),
+            _ if key == bindings.key_pause_replay => Some(ReplayKey::PlayPause),
+            _ if key == bindings.key_rev => Some(ReplayKey::Rewind),
+            _ if key == bindings.key_next_lap => Some(ReplayKey::NextLap),
+            _ if key == bindings.key_previous_lap => Some(ReplayKey::PreviousLap),
+            _ if key == bindings.key_start_replay => {
+                // back to the driving (a loaded replay has none)
+                leave_replay(&mut rig, shared, online);
+                return true;
+            }
+            _ => None,
+        }
+    } else if alt {
+        None
+    } else {
+        match key {
+            0x50 | 0x13 => Some(ReplayKey::PlayPause),
+            0x24 => Some(ReplayKey::Stop),
+            0xbe => Some(ReplayKey::NextFrame),
+            0x21 => Some(ReplayKey::NextLap),
+            0x22 => Some(ReplayKey::PreviousLap),
+            0x79 => {
+                save_replay(&mut rig);
+                return true;
+            }
+            _ => None,
+        }
+    };
+    match command {
+        Some(command) => {
+            rig.key(command);
+            true
+        }
+        None => false,
+    }
+}
+
+/// F10: the replay into rustyAC's replay folder, under the name the game's autosave would
+/// give it (with an `M` for "by hand" where the session's letter goes).
+fn save_replay(rig: &mut ReplayRig) {
+    let name = rig.file_name("M");
+    match rig.save(&name, false) {
+        Ok(path) => println!("Saving replay: {}", path.display()),
+        Err(message) => eprintln!("WARNING: the replay was not saved: {message}"),
+    }
+}
+
+/// A call of the replay's bar on the replay manager. The answer of a save: whether it was
+/// written, and the name for the message.
+fn replay_bar_action(rig: &mut ReplayRig, asked: rustyac_gui::replay_interface::ReplayAction, shared: &Shared, online: bool) -> Option<(bool, String)> {
+    use rustyac_gui::replay_interface::ReplayAction;
+    match asked {
+        ReplayAction::StopReplayMode => leave_replay(rig, shared, online),
+        ReplayAction::Save(name) => {
+            return Some(match rig.save(&name, false) {
+                Ok(path) => {
+                    println!("Saving replay: {}", path.display());
+                    (true, name)
+                }
+                Err(message) => {
+                    eprintln!("WARNING: the replay was not saved: {message}");
+                    (false, name)
+                }
+            });
+        }
+        asked => {
+            let manager = rig.manager.as_mut().filter(|manager| manager.replay_mode)?;
+            match asked {
+                ReplayAction::Rewind => manager.rewind(1, false),
+                ReplayAction::FastForward => manager.fast_forward(1, false),
+                ReplayAction::Play => manager.play(),
+                ReplayAction::Pause => manager.pause(),
+                ReplayAction::Stop => manager.stop(),
+                ReplayAction::NextFrame => manager.next_frame(),
+                ReplayAction::SlowMotion(level) => manager.slow_motion(level),
+                ReplayAction::SetNormalizedPosition(p) => manager.set_normalized_position(p),
+                // ReplayInterface::onSliderSelection's own event (status 10)
+                ReplayAction::SliderInteraction => {
+                    let (time_mult, slow_motion_level) = (manager.time_mult, manager.slow_mo_level);
+                    manager.events.push(rustyac_physics::replay::ReplayEvent::StatusChanged { status: 10, time_mult, slow_motion_level });
+                }
+                ReplayAction::SetCutInPerc(p) => drop(manager.set_cut_in_perc(p)),
+                ReplayAction::SetCutOutPerc(p) => drop(manager.set_cut_out_perc(p)),
+                ReplayAction::StopReplayMode | ReplayAction::Save(_) => {}
+            }
+        }
+    }
+    None
+}
+
+/// `ReplayManager::stopReplayMode`: the driving goes on (offline the physics was standing).
+fn leave_replay(rig: &mut ReplayRig, shared: &Shared, online: bool) {
+    if rig.manager.as_ref().is_some_and(|manager| manager.has_loaded_replay) {
+        return;
+    }
+    rig.stop_replay_mode();
+    rustyac_game::shm::IN_REPLAY.store(false, Ordering::Relaxed);
+    if !online {
+        shared.paused.store(false, Ordering::Relaxed);
+    }
+    println!("REPLAY: back to the session");
+}
+
+/// `ScreenCapturer::getPath` 0x140162be0: the name of the file, with the local time as the game
+/// writes it (no leading zeros, the year counted from 1900). The game writes JPEG
+/// (`system/cfg/assetto_corsa.ini [SCREENSHOT] FORMAT=JPG`); rustyAC writes PNG.
+fn screenshot_name(car: &str, track: Option<&str>) -> String {
+    // SAFETY: a plain call.
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let mut name = format!("Screenshot_{car}_");
+    if let Some(track) = track {
+        name.push_str(track);
+        name.push('_');
+    }
+    format!("{name}{}-{}-{}-{}-{}-{}.png", t.wDay, t.wMonth, t.wYear as i32 - 1900, t.wHour, t.wMinute, t.wSecond)
+}
+
+/// `ReplayManager::startReplayMode`: the replay of the session so far, from its first frame.
+/// Offline the physics stands still meanwhile (`Sim::onReplayModeChanged`).
+fn enter_replay(rig: &mut ReplayRig, shared: &Shared, online: bool) {
+    if rig.start_replay_mode() {
+        rustyac_game::shm::IN_REPLAY.store(true, Ordering::Relaxed);
+        if !online {
+            shared.paused.store(true, Ordering::Relaxed);
+        }
+        println!("{}", rig.status_line());
+    } else {
+        println!("REPLAY: nothing is recorded yet");
+    }
+}
+
+fn sinks(options: &Options, setup: &SimSetup, feed: &Option<Arc<Mutex<Feed>>>, rig: &Option<Arc<Mutex<ReplayRig>>>, ghost: &Option<Arc<Mutex<GhostRig>>>, telemetry: &Option<Arc<Mutex<TelemetryRig>>>) -> Result<Vec<Box<dyn StepSink>>, String> {
+    let mut sinks: Vec<Box<dyn StepSink>> = Vec::new();
+    if let Some(ghost) = ghost {
+        sinks.push(Box::new(GhostSink { rig: Arc::clone(ghost) }));
+    }
+    if let Some(rig) = telemetry {
+        sinks.push(Box::new(TelemetrySink { rig: Arc::clone(rig) }));
+    }
+    if let Some(folder) = &options.ai_record {
+        sinks.push(Box::new(rustyac_game::ai_record::AiRecordSink::new(folder.clone())));
+        println!("recording an AI line from the player's car; saved into {} at the end", folder.display());
+    } else if let Some(track) = &options.track {
+        // the AI app's "start recording": the game saves into the track's ai folder, rustyAC into its cfg folder's copy of that path
+        let ai = cfg_dir(options).join("content/tracks").join(track).join(options.layout.as_deref().unwrap_or("")).join("ai");
+        sinks.push(Box::new(rustyac_game::ai_record::AiRecordSink::new(ai)));
+    }
+    sinks.push(Box::new(TempRunSink { folder: cfg_dir(options).join("TempRuns"), file: None }));
+    if let Some(rig) = rig {
+        sinks.push(Box::new(ReplaySink { rig: Arc::clone(rig), save: options.save_replay.clone() }));
+    }
+    if let Some(feed) = feed {
+        sinks.push(Box::new(AudioSink::new(Arc::clone(feed))));
+    }
+    if let Some(path) = &options.record {
+        sinks.push(Box::new(Recorder::new(path, InputWriter::create(path, setup)?)));
+        println!("recording the inputs of every step to {}", path.display());
+    }
+    if !options.no_shm {
+        match SharedMemory::create() {
+            Ok(memory) => {
+                println!(
+                    "shared memory: publishing Local\\acpmf_physics, acpmf_graphics, acpmf_static{}",
+                    if memory.reused() { " (the pages were still held open by a reader of an earlier session)" } else { "" }
+                );
+                sinks.push(Box::new(ShmSink::new(memory)));
+            }
+            // the car drives all the same
+            Err(message) => eprintln!("WARNING: no shared memory: {message}"),
+        }
+    }
+    Ok(sinks)
+}
+
+/// What the on-board free, the cinematic and the helicopter cameras read this frame: every
+/// key (none when the window is not in front), the cursor and the desktop's size.
+fn orbit_input(focused: bool) -> OrbitInput {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetDesktopWindow, GetSystemMetrics, GetWindowRect, SM_CYVIRTUALSCREEN};
+    let mut input = OrbitInput::default();
+    // SAFETY: plain calls.
+    unsafe {
+        if focused {
+            for (vk, held) in input.keys.iter_mut().enumerate() {
+                *held = GetAsyncKeyState(vk as i32) != 0;
+            }
+        }
+        let mut cursor = windows::Win32::Foundation::POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        let _ = GetWindowRect(GetDesktopWindow(), &mut rect);
+        input.cursor = (cursor.x, cursor.y);
+        input.screen = (rect.right, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    }
+    input
+}
+
+/// Whether the session begins in the ESC menu, as the game's does (`Sim::Sim` 0x140192070:
+/// no replay is loaded and `system/cfg/options.ini [OPTIONS] DISABLE_SHOW_MODE` is 0). Asked
+/// for or refused with `--esc-start` / `--no-esc-start`; left alone, it is so for a drive at
+/// the wheel in a window, and not for a replay, a drive nobody sits at, a picture, a run
+/// without AC's GUI, or online (where rustyAC has no ESC menu yet).
+fn esc_start(options: &Options) -> bool {
+    if options.replay.is_some() || options.join.is_some() || options.online_session || options.no_gui || options.no_hud || options.debug_view {
+        return false;
+    }
+    if let Some(asked) = options.esc_start {
+        return asked;
+    }
+    let unattended = options.headless || options.screenshot.is_some() || options.autodrive || options.ai_drive || options.flat_out || options.duration.is_some() || options.gui_do.is_some();
+    let disabled = rustyac_content::install::ac_root()
+        .and_then(|game| rustyac_physics::data::ini::IniReader::load(&game.join("system/cfg/options.ini")).ok())
+        .is_some_and(|ini| ini.get_float("OPTIONS", "DISABLE_SHOW_MODE").unwrap_or(0.0) != 0.0);
+    !unattended && !disabled
+}
+
+/// The car's set-up, and the recorded drive if one is to be played.
+/// Task 47d: the game's Steam achievements, when `--steam-achievements on` (else
+/// `[STEAM] ACHIEVEMENTS` in rustyAC's own `cfg\rustyac.ini`) turns them on and Steam runs.
+fn steam_achievements(options: &Options) -> Option<rustyac_game::achievements::Messages> {
+    let ini = || rustyac_physics::data::ini::IniReader::load(&rustyac_game::conditions::cfg_dir(options).join("rustyac.ini")).ok()?.get_int("STEAM", "ACHIEVEMENTS").ok();
+    let on = options.steam_achievements.unwrap_or_else(|| ini().is_some_and(|v| v != 0));
+    (on && rustyac_game::steam::session().is_some()).then(Default::default)
+}
+
+/// Task 28: where the referee's files go: `--out-dir`, else `out` beside rustyac.exe (never
+/// one of Assetto Corsa's folders).
+fn referee_out(options: &Options) -> Option<PathBuf> {
+    if let Some(folder) = &options.out_dir {
+        return Some(folder.clone());
+    }
+    Some(rustyac_game::conditions::own_dir(options).join("out"))
+}
+
+/// Task 28: the referee's buttons pressed at given seconds of the run.
+fn session_script(options: &Options) -> Vec<(f64, u32)> {
+    options.next_session_at.iter().map(|at| (*at, event::NEXT_SESSION)).chain(options.restart_session_at.iter().map(|at| (*at, event::RESTART_SESSION))).chain(options.pit_keys.iter().copied()).chain(options.ai_pit_at.iter().map(|at| (*at, event::AI_PIT))).collect()
+}
+
+fn drive(options: &Options) -> Result<(SimSetup, Option<Vec<StepInput>>), String> {
+    match &options.replay {
+        Some(path) => {
+            let file = InputFile::read(path)?;
+            println!("replaying {} ({} steps, {:.1} s)", path.display(), file.steps.len(), file.steps.len() as f64 * 0.003);
+            Ok((file.setup, Some(file.steps)))
+        }
+        None => Ok((live_setup(options)?, None)),
+    }
+}
+
+/// Task 25: joins the server the command line or race.ini names, if any. Returns the
+/// session and the options of the drive on it: the server's car, skin and track, the pit
+/// box of the player's slot.
+fn join_server(options: &Options) -> Result<Option<(Options, rustyac_game::online::OnlineSession)>, String> {
+    let Some(target) = rustyac_game::join::target(options)? else {
+        return Ok(None);
+    };
+    if options.join.is_none() {
+        println!("race.ini has [REMOTE] ACTIVE=1 and the command line names no car and no track: joining that server (--offline: drive alone)");
+    }
+    let joined = rustyac_game::join::join(options, &target)?;
+    for note in &joined.notes {
+        println!("{note}");
+    }
+    let accepted = &joined.session.net.client.accepted;
+    let mut online = options.clone();
+    online.car = accepted.model.clone();
+    online.skin = Some(accepted.skin.clone());
+    online.track = Some(accepted.track.clone());
+    online.layout = Some(if accepted.track_config.is_empty() { "-".to_string() } else { accepted.track_config.clone() });
+    // (--spawn start puts the car on the grid slot instead: for checks with the line
+    // follower, which does not know the way out of the pits)
+    if !options.spawn_given {
+        online.spawn = "pit".to_string();
+        online.spawn_given = true;
+    }
+    online.no_race_cars = true;
+    online.online_session = true;
+    online.force_virtual_mirror = accepted.force_virtual_mirror;
+    online.cars = None;
+    online.opponents.clear();
+    if online.sun.is_none() {
+        online.sun = Some(accepted.sun_angle);
+    }
+    Ok(Some((online, joined.session)))
+}
+
+/// The set-up of a drive on a server: [`live_setup`] of the server's car and track, in the
+/// pit box of the player's slot.
+fn online_setup(options: &Options, session: &rustyac_game::online::OnlineSession) -> Result<SimSetup, String> {
+    let mut setup = live_setup(options)?;
+    let accepted = &session.net.client.accepted;
+    setup.opponents.clear();
+    setup.player_skin = Some(accepted.skin.clone());
+    // CarAvatar::setSpawnPositionIndex("PIT", sessionID) / ("START", handshakeCarPosition)
+    setup.player_place = Some(rustyac_game::input_file::GridPlace { pit: accepted.session_id as usize, start: accepted.current_session.handshake_position.map_or(-1, |p| p as i32), ballast_kg: 0.0, restrictor: 0.0 });
+    // the server's weather comes with its first weather message; its grip with the session
+    setup.session.dynamic_track = None;
+    setup.session.ballast_kg = 0.0;
+    setup.session.restrictor = 0.0;
+    Ok(setup)
+}
+
+/// What the physics thread hands back when it ends.
+type Outcome = Result<(CarView, Timing), String>;
+
+/// Starts the physics thread. The car is built on it (the car is not `Send`), with the
+/// driver `make_source` creates there (device handles belong to the thread that polls them).
+fn start_physics(
+    setup: SimSetup,
+    make_source: impl FnOnce() -> Box<dyn DriverSource> + Send + 'static,
+    shared: &Arc<Shared>,
+    sinks: Vec<Box<dyn StepSink>>,
+    config: LoopConfig,
+    online: Option<rustyac_game::online::OnlineSession>,
+) -> Result<std::thread::JoinHandle<Outcome>, String> {
+    let shared = Arc::clone(shared);
+    std::thread::Builder::new()
+        .name("physics".to_string())
+        .spawn(move || {
+            let built = match online {
+                Some(session) => GameSim::new_online(setup, make_source(), session),
+                None => GameSim::new(setup, make_source()),
+            };
+            let outcome = built.and_then(|sim| physics_thread::run(sim, &shared, sinks, config));
+            shared.finished.store(true, Ordering::Relaxed);
+            outcome.map(|(sim, timing)| (CarView::capture(&sim, 0.0), timing))
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The lap timer's numbers at the end of a run on a track.
+fn lap_report(view: &CarView) {
+    let lap = &view.lap;
+    if lap.on_track {
+        use rustyac_game::render::hud::lap_clock;
+        println!(
+            "laps: {} listed, last {}{}, best {}; the running lap {} ({}), {:.1} % round, sector {} of {}",
+            lap.laps,
+            lap_clock(lap.last_ms),
+            if lap.last_ms != 0 && !lap.last_valid { " (cut)" } else { "" },
+            lap_clock(lap.best_ms),
+            lap_clock(lap.current_ms),
+            if lap.valid { "valid".to_string() } else { format!("{} cuts", lap.cuts) },
+            lap.position.clamp(0.0, 1.0) * 100.0,
+            lap.sector + 1,
+            lap.sector_count
+        );
+    }
+}
+
+fn report(view: &CarView, timing: &Timing) {
+    lap_report(view);
+    println!("{}", timing.report());
+    println!(
+        "the car after {} steps: {:.1} km/h, gear {}, {:.0} rpm, at x {:.2} y {:.3} z {:.2}",
+        view.steps,
+        view.speed_kmh,
+        view.gear - 1,
+        view.rpm,
+        view.body[3][0],
+        view.body[3][1],
+        view.body[3][2]
+    );
+    println!(
+        "its controls at the end: gas {:.3}, brake {:.3}, steer {:.4}, clutch {:.2} (driver: {})",
+        view.gas,
+        view.brake,
+        view.steer,
+        view.clutch,
+        rustyac_game::input::device_name(view.device)
+    );
+}
+
+/// `--headless` without a window: the car runs in real time, with a recorded drive or with
+/// nobody at the controls, until `--duration` is over or the drive ends. With
+/// `--bench-render` frames are drawn off screen meanwhile, as fast as the card goes.
+fn run_headless(options: &Options) -> Result<(), String> {
+    let joined = join_server(options)?;
+    let (options, online) = match joined {
+        Some((online_options, session)) => (online_options, Some(session)),
+        None => (options.clone(), None),
+    };
+    let options = &options;
+    let (setup, replay) = match &online {
+        Some(session) => (online_setup(options, session)?, None),
+        None => drive(options)?,
+    };
+    let feed = audio_feed(options, true);
+    let sinks = sinks(options, &setup, &feed, &replay_rig(options, false), &ghost_rig(options), &telemetry_rig(options, false))?;
+    let shared = Shared::new();
+    let config = LoopConfig {
+        replay: replay.clone(),
+        duration: options.duration.map(Duration::from_secs_f64),
+        max_steps: None,
+        pause_unfocused: false,
+        auto_reset: true,
+        net_tape: options.net_tape.clone(),
+        chat: options.chat.clone(),
+        referee_out: referee_out(options),
+        session_script: session_script(options),
+        pit_clicks: options.pit_clicks.clone(),
+        drawn_frames: options.drawn_frames,
+        achievements: steam_achievements(options),
+    };
+    if options.duration.is_none() && options.replay.is_none() {
+        println!("no --duration: running until Ctrl+C");
+    }
+    let replaying = replay.is_some();
+    let drift_drive = options.drift_drive;
+    let autodrive = options.autodrive;
+    let source = move || -> Box<dyn DriverSource> {
+        if replaying {
+            Box::new(ReplaySource::default())
+        } else if drift_drive {
+            Box::new(SpawnSequence::new(rustyac_game::autodrive::DriftDriver::default(), true))
+        } else if autodrive {
+            Box::new(SpawnSequence::new(AutoDriver::new(), true))
+        } else {
+            Box::new(SpawnSequence::new(NobodySource, true))
+        }
+    };
+    let thread = start_physics(setup, source, &shared, sinks, config, online)?;
+    let mut frames = 0u64;
+    let mut frame_max = Duration::ZERO;
+    let mut headless_audio: Option<GameAudio> = None;
+    let mut bench_stats = None;
+    // --bench-render: the frames are counted from the first one (the loading of the picture,
+    // which a preset can make long, is not part of the rate)
+    let mut bench_from: Option<Instant> = None;
+    let mut bench_seconds = 0.0f64;
+    if options.bench_render {
+        let mut renderer: Option<Picture> = None;
+        let mut camera = None;
+        let mut shape = None;
+        let mut last = Instant::now();
+        while !shared.finished.load(Ordering::Relaxed) && !thread.is_finished() && !STOP.load(Ordering::Relaxed) {
+            if shape.is_none() {
+                let info = shared.car_info.lock().unwrap().clone();
+                if let Some(info) = info {
+                    let others = shared.other_infos.lock().unwrap().clone();
+                    // the camera's car (--focus)
+                    let focused = if options.focus == 0 { info.clone() } else { others.get(options.focus - 1).cloned().unwrap_or_else(|| info.clone()) };
+                    match make_picture(options, options.width, options.height, &info, &others) {
+                        Ok(picture) => {
+                            println!("drawing {} x {} off screen: {}", options.width, options.height, picture.describe());
+                            renderer = Some(picture);
+                        }
+                        Err(message) => {
+                            // the physics thread runs already: end it tidily first
+                            shared.quit.store(true, Ordering::Relaxed);
+                            let _ = thread.join();
+                            return Err(message);
+                        }
+                    }
+                    let car_shape = CarShape::of(&focused);
+                    camera = Some(DrivingCamera::from_name(&options.camera, &car_shape).unwrap_or_else(|_| DrivingCamera::chase()));
+                    shape = Some(car_shape);
+                    // the loading is not part of the timing
+                    last = Instant::now();
+                    bench_from = Some(last);
+                }
+            }
+            let (Some(shape), Some(renderer), Some(camera)) = (&shape, &mut renderer, &mut camera) else {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            };
+            let now = Instant::now();
+            let world = shared.world_at(now);
+            let focus = options.focus.min(world.len() - 1);
+            let view = world[focus];
+            let dt = (now - last).as_secs_f32();
+            let frame = camera.update(&view, shape, view.acc_g, dt);
+            let info = HudInfo { fps: 0.0, timing: shared.timing(), camera: camera.name(), replay: replaying, notes: shared.online_hud.lock().unwrap().clone(), referee: shared.referee_hud.lock().unwrap().clone(), ..HudInfo::default() };
+            renderer.draw_world(&world, focus, shape, camera, &frame, &info, dt);
+            renderer.finish();
+            bench_stats = renderer.frame_stats();
+            frames += 1;
+            bench_seconds = bench_from.map_or(0.0, |from| from.elapsed().as_secs_f64());
+            if frames > 10 {
+                frame_max = frame_max.max(now - last);
+            }
+            last = now;
+        }
+        // --bench-shot: the picture as it is at the end (an online session cannot be redone
+        // for a --screenshot: this is its picture)
+        if let (Some(path), Some(shape), Some(renderer), Some(camera)) = (&options.bench_shot, &shape, &mut renderer, &mut camera) {
+            let world = shared.world_at(Instant::now());
+            let focus = options.focus.min(world.len() - 1);
+            let view = world[focus];
+            let frame = camera.update(&view, shape, view.acc_g, 1.0 / 60.0);
+            let info = HudInfo { fps: 0.0, timing: shared.timing(), camera: camera.name(), replay: replaying, notes: shared.online_hud.lock().unwrap().clone(), referee: shared.referee_hud.lock().unwrap().clone(), ..HudInfo::default() };
+            renderer.draw_world(&world, focus, shape, camera, &frame, &info, 1.0 / 60.0);
+            let pixels = renderer.read_pixels()?;
+            let (width, height) = renderer.size();
+            write_png(path, width, height, &pixels)?;
+            println!("{}: {width} x {height}, the last frame drawn off screen", path.display());
+        }
+    } else if feed.is_some() {
+        // no picture, but sound: its frames at about 60 a second, the listener at the camera
+        let mut audio: Option<(GameAudio, CarShape, DrivingCamera)> = None;
+        let mut failed = false;
+        let mut last = Instant::now();
+        while !shared.finished.load(Ordering::Relaxed) && !thread.is_finished() && !STOP.load(Ordering::Relaxed) {
+            if audio.is_none() && !failed {
+                let info = shared.car_info.lock().unwrap().clone();
+                if let Some(info) = info {
+                    let others = shared.other_infos.lock().unwrap().clone();
+                    let focused = if options.focus == 0 { info.clone() } else { others.get(options.focus - 1).cloned().unwrap_or_else(|| info.clone()) };
+                    let shape = CarShape::of(&focused);
+                    let camera = DrivingCamera::from_name(&options.camera, &shape).unwrap_or_else(|_| DrivingCamera::chase());
+                    match start_audio(options, &feed, &info, &others) {
+                        Some(sound) => audio = Some((sound, shape, camera)),
+                        None => failed = true,
+                    }
+                    last = Instant::now();
+                }
+            }
+            if let Some((sound, shape, camera)) = audio.as_mut() {
+                let now = Instant::now();
+                let world = shared.world_at(now);
+                let view = world[options.focus.min(world.len() - 1)];
+                let frame = camera.update(&view, shape, view.acc_g, (now - last).as_secs_f32());
+                if options.audio.clockless() {
+                    sound.grid_frames(|_| (*camera, frame.matrix));
+                } else {
+                    sound.frame(camera, &frame.matrix, (now - last).as_secs_f64(), false);
+                }
+                last = now;
+                std::thread::sleep(Duration::from_millis(if options.audio.clockless() { 4 } else { 15 }));
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        headless_audio = audio.map(|(sound, _, _)| sound);
+    } else {
+        // a replay ends by itself; so does a run with a duration
+        while !shared.finished.load(Ordering::Relaxed) && !thread.is_finished() && !STOP.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    shared.quit.store(true, Ordering::Relaxed);
+    let (view, timing) = thread.join().map_err(|_| "the physics thread panicked".to_string())??;
+    report(&view, &timing);
+    if let Some(sound) = headless_audio {
+        println!("{}", sound.finish().report());
+    }
+    if options.bench_render {
+        println!(
+            "render (off screen, not waiting for a display): {frames} frames in {bench_seconds:.1} s = {:.0} FPS (average frame {:.2} ms), slowest frame {:.1} ms",
+            frames as f64 / bench_seconds.max(1e-9),
+            bench_seconds * 1000.0 / (frames.max(1)) as f64,
+            frame_max.as_secs_f64() * 1000.0
+        );
+        if let Some(stats) = bench_stats {
+            println!("  {stats}");
+        }
+    }
+    Ok(())
+}
+
+/// `--list-tracks`: every installed track and layout, and why some cannot be driven.
+fn list_tracks() -> String {
+    use rustyac_physics::track::catalog;
+    let Some(root) = rustyac_content::install::ac_root() else {
+        return format!("{}\n", rustyac_content::install::not_found_hint());
+    };
+    let mut out = String::new();
+    for entry in catalog::installed(&root) {
+        let layout = if entry.layout.is_empty() { String::new() } else { format!(" --layout {}", entry.layout) };
+        let name = if entry.ui_name.is_empty() { String::new() } else { format!("  ({})", entry.ui_name) };
+        match catalog::check(&entry) {
+            Ok(()) => out.push_str(&format!("--track {}{layout}{name}\n", entry.track)),
+            Err(refusal) => out.push_str(&format!("   refused: {}{}{name}: {refusal}\n", entry.track, if entry.layout.is_empty() { String::new() } else { format!(" / {}", entry.layout) })),
+        }
+    }
+    out
+}
+
+/// The devices found, for the console.
+fn list_devices(bindings: &Bindings, wheel: &Option<WheelDevice>) -> String {
+    let mut out = String::from("devices:\n  keyboard (always there)\n");
+    let pads = XInput::new().scan();
+    if pads.is_empty() {
+        out.push_str("  no Xbox pad on XInput (it is looked for again every second; plug it in any time)\n");
+    }
+    for index in &pads {
+        out.push_str(&format!("  Xbox pad on XInput slot {index}{}\n", if Some(index) == pads.first() { " (in use)" } else { "" }));
+    }
+    out.push_str(&rustyac_game::input::dinput::describe_devices(wheel));
+    out.push_str(&format!("  input method of the bindings: {}; whichever device is touched last drives\n", bindings.input_method));
+    out
+}
+
+/// The normal way to run: a window, the live devices (or a recorded drive to watch).
+fn run_window(options: &Options) -> Result<(), String> {
+    let joined = join_server(options)?;
+    let (options, online) = match joined {
+        Some((online_options, session)) => (online_options, Some(session)),
+        None => (options.clone(), None),
+    };
+    let options = &options;
+    let (mut setup, replay) = match &online {
+        Some(session) => (online_setup(options, session)?, None),
+        None => drive(options)?,
+    };
+    let setup_esc_start = setup.esc_start && replay.is_none();
+    let mut notes = Vec::new();
+    let mut bindings = Bindings::load(options, &mut notes);
+    // Task 33: the wheel's effects the force feedback app saved ("Save") in rustyAC's cfg
+    if let Ok(saved) = rustyac_game::input::ini::ControlsIni::load(&cfg_dir(options).join("controls.ini")) {
+        if saved.has_section("FF_ENHANCEMENT") {
+            for key in ["CURBS", "ROAD", "SLIPS", "ABS"] {
+                if saved.has_key("FF_ENHANCEMENT", key) {
+                    bindings.ini.set("FF_ENHANCEMENT", key, saved.get_string("FF_ENHANCEMENT", key));
+                }
+            }
+            notes.push(format!("the wheel's effects from {}", cfg_dir(options).join("controls.ini").display()));
+        }
+    }
+    for note in &notes {
+        println!("bindings: {note}");
+    }
+    if replay.is_none() && bindings.input_method == "WHEEL" {
+        // what the physics reads off AC's wheel class: the force's filter, the understeer
+        // effect and the device's gain (the pad's and the keyboard's classes have 0, off, 1)
+        let wheel = rustyac_game::input::wheel::DiCarControl::from_ini(&bindings.ini);
+        setup.env.ff_filter = wheel.ff_filter;
+        setup.env.use_fake_understeer_ff = wheel.use_fake_understeer_ff;
+        setup.ff_gain = wheel.ff_gain;
+    }
+    let window = Window::create("rustyAC", options.width, options.height, options.windowed, options.no_focus)?;
+    let window_handle = window.handle.0 as isize;
+    // a pad does not count as "somebody is at the PC": keep the display on while the window is open
+    // SAFETY: a plain request to the power manager, taken back at the end of this function.
+    unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED) };
+    // a Ctrl key that is itself a driving key (AC's files put gear-down on Left Ctrl) does not
+    // make a Ctrl+letter command: the other Ctrl key does, and Alt (`[RUSTYAC] COMMAND_MODIFIER`)
+    let keyboard = KeyboardCarControl::from_ini(&bindings.ini);
+    let ctrl_drives = [keyboard.drives_with(0xa2) || keyboard.drives_with(0x11), keyboard.drives_with(0xa3) || keyboard.drives_with(0x11)];
+    // rustyAC's plain keys for the aids and the brake bias, where the bindings leave them free
+    let plain_keys: Vec<i32> = [KEY_PLAIN_TC, KEY_PLAIN_ABS, KEY_PLAIN_BIAS_UP, KEY_PLAIN_BIAS_DN].into_iter().filter(|key| bindings.plain_key_free(*key)).collect();
+    if replay.is_none() {
+        print!("{}", bindings.describe());
+        match bindings.write_if_missing(&rustyac_game::conditions::own_dir(options)) {
+            Ok(Some(path)) => println!("bindings written to {} (edit it to change them)", path.display()),
+            Ok(None) => {}
+            Err(message) => eprintln!("WARNING: {message}"),
+        }
+    }
+    let feed = audio_feed(options, false);
+    let rig = replay_rig(options, true);
+    let is_online = online.is_some();
+    let ghost = ghost_rig(options).filter(|_| !is_online);
+    let telemetry = telemetry_rig(options, true).filter(|_| !is_online);
+    let sinks = sinks(options, &setup, &feed, &rig, &ghost, &telemetry)?;
+    let shared = Shared::new();
+    // a replay waits for the picture: its first step runs when the first frame is drawn (the
+    // frame loop sets the transport's speed)
+    if replay.is_some() {
+        shared.replay_speed.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+    // the window says when it has the keyboard (and Windows may not have given it)
+    shared.focused.store(false, Ordering::Relaxed);
+    let config = LoopConfig { replay: replay.clone(), duration: None, max_steps: None, pause_unfocused: !options.no_focus, auto_reset: true, net_tape: options.net_tape.clone(), chat: options.chat.clone(), referee_out: referee_out(options), session_script: session_script(options), pit_clicks: options.pit_clicks.clone(), drawn_frames: None, achievements: steam_achievements(options) };
+    let steam_messages = config.achievements.clone();
+    let source = {
+        let (bindings, shared, rumble, ffb, live) = (bindings.clone(), Arc::clone(&shared), !options.no_rumble, options.ffb, replay.is_none());
+        let (autodrive, drift_drive) = (options.autodrive, options.drift_drive);
+        move || -> Box<dyn DriverSource> {
+            if !live {
+                return Box::new(ReplaySource::default());
+            }
+            if drift_drive {
+                return Box::new(SpawnSequence::new(rustyac_game::autodrive::DriftDriver::default(), true));
+            }
+            if autodrive {
+                return Box::new(SpawnSequence::new(AutoDriver::new(), true));
+            }
+            let wheel = WheelDevice::open(&bindings, window_handle, ffb);
+            print!("{}", list_devices(&bindings, &wheel));
+            Box::new(SpawnSequence::new(LiveSource::new(bindings, shared, rumble, wheel, window_handle), true))
+        }
+    };
+    let thread = start_physics(setup, source, &shared, sinks, config, online)?;
+
+    // the car is built on the physics thread: wait for it (or for its refusal)
+    let car_info = loop {
+        if let Some(info) = shared.car_info.lock().unwrap().as_ref() {
+            break info.clone();
+        }
+        if thread.is_finished() {
+            drop(window);
+            return thread.join().map_err(|_| "the physics thread panicked".to_string())?.map(|_| ());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let other_infos = shared.other_infos.lock().unwrap().clone();
+    // every car's shape (its eye point and its cameras), the player's first
+    let mut shapes: Vec<CarShape> = std::iter::once(&car_info).chain(&other_infos).map(CarShape::of).collect();
+    let car_names: Vec<String> = std::iter::once(&car_info).chain(&other_infos).map(|info| Path::new(&info.name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| info.name.clone())).collect();
+    // what the Onboard settings app saved in rustyAC's own cfg: every car's own eye point,
+    // the pitch of the player's car's file for every car (as the game does)
+    for (shape, unix) in shapes.iter_mut().zip(&car_names) {
+        shape.apply_saved_car_files(&cfg_dir(options), unix);
+        shape.apply_own_onboard(&cfg_dir(options), unix, &car_names[0]);
+    }
+    // Task 33: the force feedback app's car.ini (FFMULT, STEER_ASSIST) for the player's car,
+    // as jobs of the physics thread at the start (so a recording repeats them)
+    if replay.is_none() {
+        let jobs = rustyac_game::render::gui_apps::saved_car_jobs(&cfg_dir(options), &car_names[0]);
+        if !jobs.is_empty() {
+            println!("cfg: the player's car takes the force feedback settings saved in {}", cfg_dir(options).join("content/cars").join(&car_names[0]).join("data/car.ini").display());
+            shared.setup_jobs.lock().unwrap().extend(jobs);
+        }
+    }
+    let mut focus = Focus::new(options.focus.min(other_infos.len()));
+    let mut focus_script = options.focus_script.clone();
+    focus_script.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let shape = shapes[focus.index].clone();
+    let (width, height) = window.client_size();
+    let graphics = make_picture(options, width, height, &car_info, &other_infos).and_then(|mut renderer| {
+        if let Some(ghost) = &ghost {
+            renderer.set_ghost(Arc::clone(ghost));
+        }
+        let chain = renderer.swap_chain(window.handle)?;
+        Ok((renderer, chain))
+    });
+    let (mut renderer, chain) = match graphics {
+        Ok(graphics) => graphics,
+        Err(message) => {
+            // the physics thread runs already: end it tidily first (devices, recording, shared memory)
+            shared.quit.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+            return Err(message);
+        }
+    };
+    println!("window {width} x {height}: {}", renderer.describe());
+    // (Sim::Sim keeps the virtual mirror off with a headset)
+    // (VirtualMirrorRenderer's constructor: forced by the server and no headset, it is on)
+    if (options.virtual_mirror || options.force_virtual_mirror) && !renderer.vr() {
+        renderer.set_virtual_mirror(true);
+    }
+    let mut audio = start_audio(options, &feed, &car_info, &other_infos);
+    // Task 47c: OculusManager (Sim::createCamera, MODE=OCULUS): the Rift's sound device
+    if let (Some(audio), Some(id)) = (audio.as_mut(), renderer.rift_audio_driver()) {
+        audio.set_driver(id as i32);
+    }
+    // the cockpit camera's head tracker (CameraOnBoard's TrackIR), when NPClient64.dll is there
+    let head_tracker = rustyac_game::trackir::open(window_handle, rustyac_content::install::documents().as_deref());
+    let mut camera = match DrivingCamera::from_name(&options.camera, &shape) {
+        Ok(camera) => camera,
+        Err(message) => {
+            // (as above: the physics thread runs already)
+            shared.quit.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+            return Err(message);
+        }
+    };
+    // the chase cameras: rustyAC's own chase_cam.ini (the ChaseCam Editor saves it), else the game's
+    let chase_ini = [cfg_dir(options).join("system/cfg/chase_cam.ini"), rustyac_content::install::ac_root().unwrap_or_default().join("system/cfg/chase_cam.ini")];
+    if let Some(path) = chase_ini.iter().find(|p| p.is_file()) {
+        if let Err(e) = camera.read_chase_ini(path) {
+            eprintln!("WARNING: {}: {e}", path.display());
+        }
+    }
+    // Task 46: the cockpit's g forces, shake and look keys, the drivable views' look keys: the
+    // player's camera_onboard.ini / camera_manager.ini (rustyAC's own cfg, else AC's Documents),
+    // the game's camera_drivable.ini
+    camera.load_settings(Some(&cfg_dir(options)), shapes.last().map_or(1.0, |s| s.shake_mul));
+    println!("camera settings: {}", camera.settings_line());
+    // Task 47b: the VR camera (`Sim::isVrConnected`); ViveManager's and OculusManager's first update show the
+    // cockpit and recentre the head
+    camera.vr = renderer.vr();
+    if camera.vr {
+        camera.vr_camera_shake = rustyac_content::install::ac_root()
+            .and_then(|game| rustyac_physics::data::ini::IniReader::load(&game.join("system/cfg/assetto_corsa.ini")).ok())
+            .is_some_and(|ini| ini.get_int("VR", "ENABLE_CAMERA_SHAKE").unwrap_or(0) != 0);
+        camera.mode = CameraMode::Cockpit;
+        camera.set_last_driving(CameraMode::Cockpit);
+        renderer.vr_recentre();
+        println!("VR: {}", if camera.vr_camera_shake { "with the cockpit's g forces and shake" } else { "the head where the headset puts it" });
+    }
+    // Task 34: a session that begins in the ESC menu shows AC's start camera until "Drive"
+    // (without AC's GUI "Drive" is pressed at once, so there is none)
+    let mut start_camera = (setup_esc_start && renderer.gui().is_some_and(|gui| gui.has_esc_menu()))
+        .then(|| StartCamera::new(car_info.track_folder.as_deref().map_or(-1.0, |folder| StartCamera::crew_side(folder, &car_info.track_layout))));
+    // F7: AC's free camera, if the game's assetto_corsa.ini allows it (`Sim.allowFreeCamera`)
+    let allow_free_camera = rustyac_content::install::ac_root()
+        .and_then(|game| rustyac_physics::data::ini::IniReader::load(&game.join("system/cfg/assetto_corsa.ini")).ok())
+        .is_some_and(|ini| ini.ready && ini.has_section("AC_APPS") && ini.get_int("CAMERA", "ALLOW_FREE_CAMERA").unwrap_or(0) > 0);
+    let mut mouse_camera: Option<MouseCamera> = None;
+    // F5, the helicopter and (with video_editing.ini's [CINEMATIC_CAMERAS] ACTIVE) F7's
+    // cinematic camera, and the scene camera they move while one of them shows
+    let (mut onboard_free, mut cinematic) = rustyac_game::render::onboard_free::load(Some(&cfg_dir(options)), Some(&car_info.data_path));
+    // Sim::Sim: setIntroMode(false) unless the session begins in the ESC menu
+    onboard_free.esc_mode = start_camera.is_some();
+    let helicopter = HelicopterCamera::default();
+    let mut shot: Option<ShotCamera> = None;
+    // the Photo mode's link as last filled, and its sun
+    let mut photo_seen = rustyac_gui::app_photo_mode::PhotoLink::default();
+    let mut photo_sun = None;
+    let mut last_frame: Option<CameraFrame> = None;
+    // F3: the track's TV cameras (CameraTrack's sets)
+    let mut track_cameras = match car_info.track_folder.as_deref().map(|folder| rustyac_game::render::track_camera::of_track(folder, &car_info.track_layout)) {
+        Some(Ok(cameras)) => cameras,
+        Some(Err(e)) => {
+            eprintln!("track cameras: {e}");
+            Default::default()
+        }
+        None => Default::default(),
+    };
+    // F2: the random camera (ACCameraManager's, system/cfg/random_camera.ini), on the cockpit
+    // shake's rand() (the game's one generator)
+    let mut random_camera = rustyac_game::render::track_camera::RandomCamera::of_install(&mut camera.cockpit.rand);
+    camera.track_sets = track_cameras.sets.len();
+    start_camera_editor(&mut renderer, options, &car_names[0], &car_info.data_path, &shapes[0]);
+    // Task 28c: one of AC's replays as the session: the file's frames into the manager, and the
+    // replay shows from its first frame (the physics stands still for good)
+    if let (Some(file), Some(rig)) = (&options.ac_replay, &rig) {
+        let loaded = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display())).and_then(|bytes| {
+            let views = shared.world_at(Instant::now());
+            let cars: Vec<(PathBuf, usize, f64)> = std::iter::once(&car_info).chain(&other_infos).zip(&views).map(|(info, view)| (info.data_path.clone(), view.wing_count as usize, view.max_fuel)).collect();
+            let mut rig = rig.lock().unwrap();
+            let header = rig.load(&bytes, &cars)?;
+            if !rig.start_replay_mode() {
+                return Err(format!("{}: the replay has no frames to play", file.display()));
+            }
+            Ok(header)
+        });
+        match loaded {
+            Ok(header) => {
+                shared.paused.store(true, Ordering::Relaxed);
+                println!("replay {}: version {}, {} frames every {} ms ({:.1} s), {} cars", file.display(), header.version, header.frames, header.record_interval_ms, header.frames as f64 * header.record_interval_ms * 0.001, header.cars.len());
+            }
+            Err(message) => {
+                shared.quit.store(true, Ordering::Relaxed);
+                let _ = thread.join();
+                return Err(message);
+            }
+        }
+    }
+    let mut ac_replay_audio = true;
+    let mut window_shot = false;
+    let mut camera_toggles = 0;
+    // the replay's transport (ReplayManager): a recorded drive starts playing
+    let mut transport = replay.is_some().then(rustyac_game::replay_manager::ReplayManager::new);
+    let mut script = options.replay_script.clone();
+    let mut new_session_at = options.new_session_at;
+    script.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let started = Instant::now();
+    let mut last = Instant::now();
+    let mut game_time = rustyac_gui::app_stats::GameTime::default();
+    // MouseHider (Sim::Sim 0x14019457b)
+    // the ESC menu asked for the player's controls to be locked
+    let mut pits_locked = false;
+    let mut mouse_hider = rustyac_game::mouse_hider::MouseHider::new(
+        rustyac_content::install::ac_root().and_then(|game| rustyac_physics::data::ini::IniReader::load(&game.join("system/cfg/mouse_hider.ini")).ok()).as_ref(),
+        bindings.input_method == "KEYBOARD",
+        window.handle,
+    );
+    let (mut frames, mut fps, mut fps_frames, mut fps_since) = (0u64, 0.0f32, 0u32, Instant::now());
+    // Ctrl+F / --show-fps: the frame-rate counter; the frame times of the running half second
+    let (mut fps_counter, mut frame_ms, mut frame_max_ms, mut running_max) = (options.show_fps, 0.0f32, 0.0f32, Duration::ZERO);
+    let mut frame_max = Duration::ZERO;
+    let mut result = Ok(());
+    let mut world = shared.world_at(Instant::now());
+    // rustyAC's own panels and numbers: --debug-hud, F10, or when AC's HUD is not there
+    let mut debug_hud = options.debug_hud || renderer.gui().is_none();
+    if let (Some(commands), Some(gui)) = (&options.gui_do, renderer.gui()) {
+        gui.script(commands)?;
+    }
+    // a session that begins in the ESC menu, and AC's GUI did not come up (the debug view
+    // is drawn instead): nobody could press "Drive", so it is pressed here
+    if setup_esc_start && !renderer.gui().is_some_and(|gui| gui.has_esc_menu()) {
+        shared.requests.fetch_or(event::PITS_DRIVE, Ordering::Relaxed);
+    }
+    'frames: loop {
+        for event in window.pump() {
+            match event {
+                Event::Close => break 'frames,
+                // ESC without AC's GUI (--no-gui, the debug view) ends the program, as before
+                Event::Key { key: 0x1b, .. } if renderer.gui().is_none() => break 'frames,
+                // ksgui::GUI's listeners of the mouse and the keyboard
+                Event::Mouse { x, y, action } => {
+                    if let Some(gui) = renderer.gui() {
+                        let now_ms = started.elapsed().as_secs_f64() * 1000.0;
+                        match action {
+                            MouseAction::Move => {
+                                mouse_hider.on_mouse_move(&mut gui.gui, now_ms);
+                                gui.mouse_move(x, y);
+                            }
+                            MouseAction::Down(button) => gui.mouse_down(x, y, button),
+                            MouseAction::Up(button) => {
+                                mouse_hider.on_mouse_up(&mut gui.gui, now_ms);
+                                gui.mouse_up(x, y, button);
+                            }
+                            MouseAction::Wheel(delta) => {
+                                // CameraOnBoardFree's OnMouseWheelMovedEvent handler, whatever shows
+                                onboard_free.wheel(delta);
+                                gui.mouse_wheel(x, y, delta as f32 / 120.0)
+                            }
+                        }
+                    }
+                }
+                Event::Char(character) => {
+                    if let Some(gui) = renderer.gui() {
+                        gui.key_char(character);
+                    }
+                }
+                Event::Focus(focused) => shared.focused.store(focused, Ordering::Relaxed),
+                Event::Resize(width, height) => {
+                    if let Err(message) = renderer.resize_swap_chain(&chain, width, height) {
+                        result = Err(message);
+                        break 'frames;
+                    }
+                }
+                Event::Key { key, left_ctrl, right_ctrl, alt, shift } => {
+                    let ctrl = bindings.command_modifier.held(left_ctrl, right_ctrl, alt, ctrl_drives);
+                    // Sim::onKeyDown 0x14019a940 skips its Ctrl block while the pause menu shows:
+                    // the plain keys run with Ctrl held (Ctrl+F7 is the free camera there)
+                    let pause_up = renderer.gui().is_some_and(|gui| gui.pause_menu_visible());
+                    let request = |bits: u32| {
+                        shared.requests.fetch_or(bits, Ordering::Relaxed);
+                    };
+                    let key = key as i32;
+                    if let Some(gui) = renderer.gui() {
+                        // Sim::onKeyDown 0x14019a940, Home (not with Ctrl and Shift; in a
+                        // rustyAC replay Home is its own "back to the start")
+                        if key == 0x24 && !(ctrl && shift) && transport.is_none() {
+                            gui.console_toggle();
+                        }
+                        gui.key_down(key as u32);
+                    }
+                    // Sim::onKeyDown 0x14019a940, the replay's commands: with Ctrl, whatever
+                    // Shift does; they come before rustyAC's own Ctrl+F
+                    let replay_keys = [bindings.key_ffwd, bindings.key_slowmo, bindings.key_pause_replay, bindings.key_rev, bindings.key_next_lap, bindings.key_previous_lap, bindings.key_start_replay];
+                    let in_ac_replay = rig.as_ref().is_some_and(|rig| rig.lock().unwrap().in_replay_mode());
+                    // Sim::onKeyDown 0x14019a940: Shift and Ctrl held (GetAsyncKeyState, either side), numpad + / -
+                    if shift && (left_ctrl || right_ctrl) && (key == 0x6b || key == 0x6d) {
+                        renderer.saturation_key(key == 0x6b);
+                    }
+                    if key == 0x09 {
+                        // Sim::onKeyDown 0x14019a940, its first lines: TAB shows the table
+                        if let Some(gui) = renderer.gui() {
+                            gui.tab_down();
+                        }
+                    } else if key == 0x1b {
+                        // Sim::onKeyDown 0x14019a940, ESC (not with Ctrl: the Ctrl block skips
+                        // the plain keys): a replay that was loaded from a file, and a drive
+                        // that is run again, end the program; a replay of the session goes back
+                        // to the session with the pause menu up (the job 0x140195f20); else
+                        // the pause menu comes, and the pause
+                        if ctrl && !pause_up {
+                            continue;
+                        }
+                        if options.ac_replay.is_some() || transport.is_some() || replay.is_some() {
+                            break 'frames;
+                        }
+                        if let (true, Some(rig)) = (in_ac_replay, &rig) {
+                            leave_replay(&mut rig.lock().unwrap(), &shared, is_online);
+                        }
+                        let moving = is_online && world.first().is_some_and(|car| car.speed_kmh > 1.0);
+                        if let Some(gui) = renderer.gui() {
+                            gui.esc_key(moving && !in_ac_replay);
+                        }
+                        // (MouseHider::forceMouseHide(false): the menu needs the cursor)
+                        if !(moving && !in_ac_replay) {
+                            mouse_hider.force_mouse_hide(false);
+                        }
+                    } else if let (true, Some(rig)) = (in_ac_replay && !(ctrl && [bindings.key_previous_car, bindings.key_player_car, bindings.key_next_car].contains(&key) && !replay_keys.contains(&key)), &rig) {
+                        // Task 28c: a replay of recorded frames shows: its keys
+                        if !ac_replay_key(rig, &shared, &bindings, key, ctrl, alt, is_online) && !ctrl && !alt {
+                            match key {
+                                0x70 | 0x43 => onboard_free::f1(&mut camera, &mut start_camera, &mut mouse_camera),
+                                0x71 => focus.command(FocusCommand::RandomCamera, &world, &car_names),
+                                0x72 => focus.command(FocusCommand::TrackCamera, &world, &car_names),
+                                0x73 => focus.command(FocusCommand::Player, &world, &car_names),
+                                0x75 => onboard_free::f6(&mut camera, &mut start_camera, &mut mouse_camera, shapes[focus.index].car_cameras.len()),
+                                0x74 if camera.shown != Some(5) => focus.command(FocusCommand::OnboardFreeCamera, &world, &car_names),
+                                _ => {}
+                            }
+                        }
+                    } else if let (true, Some(rig), true) = (transport.is_none() && replay.is_none(), &rig, ctrl && key == bindings.key_start_replay) {
+                        // Sim::onKeyDown, the command "Start Replay"
+                        enter_replay(&mut rig.lock().unwrap(), &shared, is_online);
+                    } else if let (Some(rm), true) = (transport.as_mut(), ctrl && replay_keys.contains(&key)) {
+                        if key == bindings.key_ffwd {
+                            rm.fast_forward();
+                        } else if key == bindings.key_slowmo {
+                            rm.key_slow_motion();
+                        } else if key == bindings.key_pause_replay {
+                            rm.key_pause();
+                        } else {
+                            println!("REPLAY: rewind, the lap jumps and the instant replay need recorded frames to go back over; a rustyAC replay is the drive run again (Home: back to the start)");
+                        }
+                    } else if let (Some(rm), true) = (transport.as_mut(), !ctrl && !alt && key == 0x24) {
+                        // Home (rustyAC's own key; the game's Stop is a button of its replay bar):
+                        // ReplayManager::stop, back to the first frame
+                        rm.stop();
+                        shared.replay_restart.store(true, Ordering::Relaxed);
+                    } else if ctrl && (in_ac_replay || !shared.paused.load(Ordering::Relaxed)) && world.len() > 1 && [bindings.key_previous_car, bindings.key_player_car, bindings.key_next_car].contains(&key) {
+                        // Sim::onKeyDown 0x14019a940: with Ctrl, not while the pause menu shows,
+                        // only with more than one car; tested in the game's order
+                        let command = if key == bindings.key_previous_car {
+                            FocusCommand::Previous
+                        } else if key == bindings.key_player_car {
+                            FocusCommand::Player
+                        } else {
+                            FocusCommand::Next
+                        };
+                        focus.command(command, &world, &car_names);
+                    } else if let (true, Some(gui)) = (ctrl && key == KEY_SCREENSHOT, renderer.gui()) {
+                        // Sim::onKeyDown, the command "Mouse Force Hide" (Ctrl+F8, a fixed key):
+                        // the cursor hidden for good, or back
+                        if mouse_hider.get_force_mouse_hide() {
+                            mouse_hider.force_mouse_hide(false);
+                            gui.add_message("Mouse Cursor visible", "Press CTRL + F8 to hide cursor");
+                        } else {
+                            mouse_hider.force_mouse_hide(true);
+                            gui.add_message("Mouse Cursor not visible", "Press CTRL + F8 to reset");
+                        }
+                    } else if let (true, Some(gui)) = (!ctrl && !alt && key == KEY_SCREENSHOT, renderer.gui()) {
+                        // F8: ScreenCapturer::takeScreen
+                        gui.take_screen();
+                    } else if let (true, Some(gui)) = (ctrl && key == bindings.key_reset_race && options.ac_replay.is_none() && !in_ac_replay && transport.is_none(), renderer.gui()) {
+                        // Sim::onKeyDown, the command "Reset Race" (Ctrl+O): not in a replay,
+                        // not while a menu shows; RaceManager::restartCurrentSession
+                        if !gui.pause_menu_visible() {
+                            request(event::RESTART_SESSION);
+                        }
+                    } else if let (true, Some(gui)) = (ctrl && !shared.paused.load(Ordering::Relaxed) && [bindings.key_hide_apps, bindings.key_cycle_desktop, bindings.key_driver_names, bindings.key_show_damage, bindings.key_hide_damage].contains(&key), renderer.gui()) {
+                        // Sim::onKeyDown 0x14019a940, the commands of the GUI and the HUD (the
+                        // keys of controls.ini; with Ctrl, not while the pause menu shows)
+                        if key == bindings.key_hide_apps {
+                            gui.hide_show_apps();
+                        } else if key == bindings.key_show_damage {
+                            gui.show_damage();
+                        } else if key == bindings.key_driver_names {
+                            println!("DRIVER NAMES: {}", if gui.toggle_driver_names() { "ON" } else { "OFF" });
+                        } else if key == bindings.key_hide_damage {
+                            println!("DAMAGE DISPLAYER: {}", if gui.toggle_damage() { "Enabled" } else { "Disabled" });
+                        } else {
+                            println!("GUI: desktop {}", gui.cycle_desktop() + 1);
+                        }
+                    } else if !ctrl && !alt && key == KEY_DEBUG_HUD {
+                        // F10 (rustyAC's own key): its own panels and numbers
+                        debug_hud = !debug_hud;
+                    } else if (ctrl && key == 0x46) || (!ctrl && !alt && key == KEY_FPS_COUNTER) {
+                        // Ctrl+F or F12: the frame-rate counter (rustyAC's own keys; AC has an
+                        // app for it). F alone is the keyboard's second DRS key, hence F12 too
+                        // (F9, which it was until v0.29, is the game's gap display)
+                        fps_counter = !fps_counter;
+                    } else if let (true, Some(gui)) = (ctrl && key == bindings.key_mouse_steering, renderer.gui()) {
+                        // Sim::onKeyDown 0x14019a940, the command "Mouse Steering": only while
+                        // the pause menu is hidden and the keyboard's class drives the car;
+                        // the banner tells the new state (5 s, not translated)
+                        if !gui.pause_menu_visible() && shared.keyboard_drives.load(Ordering::Relaxed) {
+                            let pending = shared.mouse_steering_toggles.fetch_add(1, Ordering::Relaxed) + 1;
+                            let on = shared.mouse_steering.load(Ordering::Relaxed) != (pending % 2 == 1);
+                            gui.add_message("Mouse Steering", if on { "Activated" } else { "Deactivated" });
+                        }
+                    } else if ctrl && key == bindings.key_traction_control {
+                        request(if shift { event::TC_DN } else { event::TC_UP });
+                    } else if ctrl && key == bindings.key_abs {
+                        request(if shift { event::ABS_DN } else { event::ABS_UP });
+                    } else if ctrl && key == bindings.key_auto_shifter {
+                        request(event::AUTO_SHIFTER);
+                    } else if ctrl && key == bindings.key_activate_ai {
+                        // Sim::onKeyDown 0x14019a940, the command "Activate AI": an AI driver
+                        // takes the car
+                        request(event::AI_ON);
+                    } else if ctrl && key == bindings.key_ideal_line {
+                        // Sim::onKeyDown 0x14019a940: no text on the screen in the game; a line here
+                        match renderer.toggle_ideal_line() {
+                            Some(on) => {
+                                rustyac_game::shm::IDEAL_LINE_ON.store(on, Ordering::Relaxed);
+                                println!("IDEAL LINE: {}", if on { "ON" } else { "OFF" });
+                            }
+                            None => println!("IDEAL LINE: this track has none (or the debug view is drawing)"),
+                        }
+                    } else if ctrl && key == rustyac_game::input::bindings::KEY_MGUK_RECOVERY {
+                        // AC's fixed commands of the hybrid cockpit: the digits 1 to 4
+                        request(if shift { event::MGUK_RECOVERY_DN } else { event::MGUK_RECOVERY_UP });
+                    } else if ctrl && key == rustyac_game::input::bindings::KEY_MGUK_DELIVERY {
+                        request(if shift { event::MGUK_DELIVERY_DN } else { event::MGUK_DELIVERY_UP });
+                    } else if ctrl && key == rustyac_game::input::bindings::KEY_MGUH_MODE {
+                        request(event::MGUH_MODE);
+                    } else if ctrl && key == rustyac_game::input::bindings::KEY_ENGINE_BRAKE {
+                        request(if shift { event::ENGINE_BRAKE_DN } else { event::ENGINE_BRAKE_UP });
+                    } else if !ctrl && !alt && plain_keys.contains(&key) {
+                        // rustyAC's plain keys, as in the browser: T / Y (Shift: down), ] / [.
+                        // Not while paused: the presses would all arrive at once afterwards.
+                        match key {
+                            _ if shared.paused.load(Ordering::Relaxed) => {}
+                            KEY_PLAIN_TC => request(if shift { event::TC_DN } else { event::TC_UP }),
+                            KEY_PLAIN_ABS => request(if shift { event::ABS_DN } else { event::ABS_UP }),
+                            KEY_PLAIN_BIAS_UP => {
+                                shared.bias_requests.fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {
+                                shared.bias_requests.fetch_sub(1, Ordering::Relaxed);
+                            }
+                        }
+                    } else if ctrl && !shift && (key == 0x6b || key == 0x6d) && start_camera.is_none() && mouse_camera.is_none() && camera.on_board() {
+                        // Sim::onKeyDown, Ctrl+Numpad +/-: the cockpit's (and the dash view's)
+                        // field of view, half a degree a press, up to 125 and down to 1
+                        let fov = shapes[focus.index].onboard_fov;
+                        let new = if key == 0x6b { (fov < 125.0).then_some(fov + 0.5) } else { (fov > 1.0).then_some(fov - 0.5) };
+                        if let Some(new) = new {
+                            // (CameraOnBoard keeps one field of view for every car)
+                            shapes.iter_mut().for_each(|shape| shape.onboard_fov = new);
+                            if let Some(gui) = renderer.gui() {
+                                gui.add_message(&format!("FOV: {new:.1}"), "On Board Camera");
+                            }
+                        }
+                    } else if !ctrl || pause_up {
+                        match key {
+                            // C: camera, P or Pause: pause, R: back to the spawn point,
+                            // Shift+R: back onto the track where the car is, N: a new car
+                            // F1 (and C, as before): AC's driving views in turn; F6: the
+                            // cameras of the car's cameras.ini
+                            0x70 | 0x43 => onboard_free::f1(&mut camera, &mut start_camera, &mut mouse_camera),
+                            // F4: back to your car (with other cars only; through the fade)
+                            // F3: the track's cameras, again: their next set (through the fade)
+                            0x72 => focus.command(FocusCommand::TrackCamera, &world, &car_names),
+                            0x73 => focus.command(FocusCommand::Player, &world, &car_names),
+                            0x75 => onboard_free::f6(&mut camera, &mut start_camera, &mut mouse_camera, shapes[focus.index].car_cameras.len()),
+                            // F2: the random camera, from the track's cameras (through the fade)
+                            0x71 => focus.command(FocusCommand::RandomCamera, &world, &car_names),
+                            // F7: the free camera (`setMode(eFree)`; again: the same, kept)
+                            0x76 if allow_free_camera => onboard_free::set_mode(6, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), 0, cinematic.is_some(), &mut track_cameras),
+                            // F5: the on-board free camera (through the fade; not again while it shows)
+                            0x74 if camera.shown != Some(5) => focus.command(FocusCommand::OnboardFreeCamera, &world, &car_names),
+                            // F11: AC's virtual mirror
+                            // (VirtualMirrorRenderer::update: not with a headset)
+                            0x7a if !renderer.vr() => match renderer.toggle_virtual_mirror(options.force_virtual_mirror) {
+                                Some(description) => {
+                                    println!("VIRTUAL MIRROR: {description}");
+                                    if let Some(gui) = renderer.gui() {
+                                        let description = rustyac_gui::locale::ac_translate(description);
+                                        gui.add_message(&rustyac_gui::locale::ac_translate("VIRTUAL MIRROR"), &description);
+                                    }
+                                }
+                                None => println!("VIRTUAL MIRROR: video.ini has no mirrors ([MIRROR] SIZE=0)"),
+                            },
+                            0x50 | 0x13 => match transport.as_mut() {
+                                // a replay: the transport's own pause
+                                Some(rm) => rm.key_pause(),
+                                None => {
+                                    shared.paused.fetch_xor(true, Ordering::Relaxed);
+                                }
+                            },
+                            0x52 => request(if shift { event::TO_TRACK } else { event::RESET }),
+                            0x4e => request(event::REBUILD),
+                            // Task 28b: the pit menu (the number pad's 4 8 6 2, or Alt with the arrow keys)
+                            0x64 => request(event::PIT_LEFT),
+                            0x68 => request(event::PIT_UP),
+                            0x66 => request(event::PIT_RIGHT),
+                            0x62 => request(event::PIT_DOWN),
+                            0x25 if alt => request(event::PIT_LEFT),
+                            0x26 if alt => request(event::PIT_UP),
+                            0x27 if alt => request(event::PIT_RIGHT),
+                            0x28 if alt => request(event::PIT_DOWN),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        // what the menus asked of the session (the calls their buttons make on Sim)
+        let mut shutdown = false;
+        if let Some(gui) = renderer.gui() {
+            // Sim::renderHUD: the table of TAB goes when the key is let go (--gui-do tab holds
+            // it for pictures)
+            // SAFETY: a plain call.
+            let tab_held = options.gui_do.as_deref().is_some_and(|script| script.split(';').any(|c| c.trim() == "tab")) || (shared.focused.load(Ordering::Relaxed) && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x09) } != 0);
+            gui.tab_poll(tab_held);
+            // OverlayLeaderboard::update: F9 (the game asks the key itself, whichever window
+            // has the keyboard; here only rustyAC's own)
+            // SAFETY: a plain call.
+            gui.overlay_poll(shared.focused.load(Ordering::Relaxed) && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x78) } != 0);
+            // Task 47d: SteamInterface's messages (an achievement unlocked)
+            for (title, text) in steam_messages.as_ref().map(|m| std::mem::take(&mut *m.lock().unwrap())).unwrap_or_default() {
+                gui.add_message(&title, &text);
+            }
+            // Task 34: what the client heard (chat, votes, its messages), then
+            // ACClientVotingManager::update: Y and N (asked of the OS, whichever window has the
+            // keyboard, as the game does)
+            if is_online {
+                let heard = std::mem::take(&mut *shared.online_events.lock().unwrap());
+                gui.online_heard(heard);
+                // SAFETY: plain calls.
+                let (y, n) = unsafe { (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x59) != 0, windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x4e) != 0) };
+                gui.voting_update(y, n, last.elapsed().as_secs_f32());
+            }
+            // MouseHider::update, once a frame
+            mouse_hider.mouse_steering = shared.mouse_steering.load(Ordering::Relaxed);
+            let menu_up = gui.esc_menu_visible() || gui.pause_menu_visible();
+            mouse_hider.update(&mut gui.gui, started.elapsed().as_secs_f64() * 1000.0, shared.focused.load(Ordering::Relaxed), menu_up, rig.as_ref().is_some_and(|rig| rig.lock().unwrap().in_replay_mode()) || transport.is_some() || replay.is_some());
+            // Task 33: the recorder's best and last laps for the ESC menu's page "Telemetry"
+            if let Some(rig) = &telemetry {
+                if let Ok(rig) = rig.try_lock() {
+                    if let Some(recorder) = &rig.recorder {
+                        gui.telemetry_laps(recorder);
+                    }
+                }
+            }
+            // the console's exit (Game::shutdown)
+            if gui.exit_requested {
+                break 'frames;
+            }
+            // the force feedback app's jobs to the physics thread (its command queue)
+            {
+                let jobs = std::mem::take(&mut gui.apps.ffb_jobs);
+                if !jobs.is_empty() {
+                    shared.setup_jobs.lock().unwrap().extend(jobs);
+                }
+            }
+            // the Telemetry app's steps from the physics thread
+            {
+                let steps = std::mem::take(&mut *shared.telemetry.lock().unwrap());
+                let shown = gui.telemetry_exchange(steps);
+                shared.telemetry_on.store(shown, Ordering::Relaxed);
+                if let Some(skids) = audio.as_ref().filter(|_| shown).and_then(|audio| audio.skids()) {
+                    gui.telemetry_skids(skids);
+                }
+                let car = shared.setup_debug.lock().unwrap().take();
+                shared.setup_debug_on.store(gui.setup_debug_exchange(car), Ordering::Relaxed);
+                shared.setup_debug_focus.store(focus.index, Ordering::Relaxed);
+                let ai = shared.ai_app.lock().unwrap().take();
+                shared.ai_app_on.store(gui.ai_app_exchange(ai), Ordering::Relaxed);
+            }
+            // the setup editor's jobs to the physics thread, the car's newest picture back
+            {
+                let newest = shared.setup_snapshot.lock().unwrap().clone();
+                let jobs = gui.setup_exchange(&newest);
+                if !jobs.is_empty() {
+                    shared.setup_jobs.lock().unwrap().extend(jobs);
+                }
+                if let Some(menu) = gui.pit_page_exchange() {
+                    *shared.pit_page.lock().unwrap() = Some(menu);
+                }
+                shared.pit_clicks.lock().unwrap().extend(gui.take_pit_clicks());
+            }
+            // Task 42c: the Python apps' cameras (ac_setCameraMode 0x14012d7d0 is
+            // `setMode(mode, false, false)`, ac_setCameraCar 0x14012d680, the free camera's calls
+            // move the mouse-control camera)
+            for asked in std::mem::take(&mut gui.python_cameras) {
+                use rustyac_python::Action;
+                let count = shapes[focus.index].car_cameras.len();
+                match asked {
+                    // ac_setCameraMode 0x14012d7d0: randomMode off before setMode (7: on after it)
+                    // (CameraCopy::set_camera_mode answered the app the same way)
+                    Action::SetCameraMode(mode) => {
+                        camera.random &= mode == 7;
+                        onboard_free::set_mode(mode, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), count, cinematic.is_some(), &mut track_cameras);
+                    }
+                    Action::SetCameraCar(index, _) if (index as usize) < count => {
+                        (start_camera, mouse_camera) = (None, None);
+                        camera.set_car_camera(index as usize);
+                    }
+                    Action::FreeCameraMoveForward(d) => mouse_camera.iter_mut().for_each(|free| free.move_forward(d)),
+                    Action::FreeCameraMoveRight(d) => mouse_camera.iter_mut().for_each(|free| free.move_right(d)),
+                    Action::FreeCameraMoveUpWorld(d) => mouse_camera.iter_mut().for_each(|free| free.move_up_world(d)),
+                    Action::FreeCameraRotatePitch(a) => mouse_camera.iter_mut().for_each(|free| free.rotate(0, a)),
+                    Action::FreeCameraRotateHeading(a) => mouse_camera.iter_mut().for_each(|free| free.rotate(1, a)),
+                    Action::FreeCameraRotateRoll(a) => mouse_camera.iter_mut().for_each(|free| free.rotate(2, a)),
+                    Action::FreeCameraClearColor(color) => gui.clear_color = Some(color),
+                    other => println!("Python: an app asked {other:?} (not carried out)"),
+                }
+            }
+            use rustyac_gui::menus::SimAction;
+            for action in gui.take_actions() {
+                match action {
+                    // Sim::setPauseMode 0x14019e6d0 (online the physics runs on: the physics
+                    // thread sees to that)
+                    SimAction::SetPauseMode(paused) => shared.paused.store(paused, Ordering::Relaxed),
+                    // (the sound follows the pause: AudioEngine::stop / start)
+                    SimAction::AudioStop | SimAction::AudioStart => {}
+                    SimAction::SkipCurrentSession => {
+                        shared.requests.fetch_or(event::NEXT_SESSION, Ordering::Relaxed);
+                    }
+                    SimAction::RestartCurrentSession => {
+                        shared.requests.fetch_or(event::RESTART_SESSION, Ordering::Relaxed);
+                    }
+                    SimAction::LockControlsUntilTime(_) | SimAction::GoToSpawnPosition(_) => {
+                        shared.requests.fetch_or(event::BACK_TO_PITS, Ordering::Relaxed);
+                    }
+                    SimAction::StartReplayMode => {
+                        if let Some(rig) = &rig {
+                            enter_replay(&mut rig.lock().unwrap(), &shared, is_online);
+                        }
+                    }
+                    SimAction::Shutdown => shutdown = true,
+                    SimAction::Exit(code) => std::process::exit(code),
+                    SimAction::ClearMessage | SimAction::FadeIn(_) => {}
+                    // (the tables' clicks: the camera to a car; off line a vote has no client)
+                    SimAction::SetFocusedCarIndex(car) => {
+                        if (car as usize) < world.len() {
+                            focus.index = car as usize;
+                        }
+                    }
+                    SimAction::SendVote { .. } => {}
+                    // the results' on-board free camera and back (the lock of the controls is
+                    // the referee's: Task 28), the ESC menu's slow turn
+                    SimAction::SetCameraMode(mode) => {
+                        let count = shapes[focus.index].car_cameras.len();
+                        onboard_free::set_mode(mode, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), count, cinematic.is_some(), &mut track_cameras);
+                    }
+                    SimAction::SetIntroMode(on) => onboard_free.esc_mode = on,
+                    // ESCMenu::render: the player's controls are locked while the menu of the
+                    // pits shows (asked once, and again after a new session)
+                    SimAction::SetControlsLock(true) => {
+                        if gui.esc_menu_visible() && (!pits_locked || gui.pits_lock_stale) {
+                            pits_locked = true;
+                            gui.pits_lock_stale = false;
+                            shared.requests.fetch_or(event::PITS_LOCK, Ordering::Relaxed);
+                        }
+                    }
+                    SimAction::SetControlsLock(false) => {}
+                    // the ESC menu's "Drive": RaceManager::startRace(10000), the controls
+                    // free, the camera back on the player's car
+                    SimAction::StartRace(_) => {
+                        pits_locked = false;
+                        shared.requests.fetch_or(event::PITS_DRIVE, Ordering::Relaxed);
+                    }
+                    SimAction::FocusPlayerCar => focus.index = 0,
+                    // (nobody listens yet: the drag race and the pit crew's lollipop man)
+                    SimAction::DriveMenuPressed => {}
+                    // the first "Drive": the camera of the driver's (the one of the last
+                    // session is not kept: the one driven with)
+                    SimAction::LoadPreviousSessionUserCamera => {
+                        start_camera = None;
+                        mouse_camera = None;
+                        if let Some(mode) = camera.load_previous() {
+                            let count = shapes[focus.index].car_cameras.len();
+                            rustyac_game::render::onboard_free::set_mode(mode, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), count, cinematic.is_some(), &mut track_cameras);
+                        }
+                    }
+                    // (online the chat's lines and the votes went to the client already)
+                    SimAction::AddMessage { .. } | SimAction::SendChat(_) => {}
+                    // the replay bar's buttons, its time line and its save box
+                    SimAction::Replay(asked) => {
+                        if let Some(rig) = &rig {
+                            let mut rig = rig.lock().unwrap();
+                            if let Some((ok, file)) = replay_bar_action(&mut rig, asked, &shared, is_online) {
+                                gui.replay_saved(ok, &file);
+                            }
+                        }
+                    }
+                    // its camera spinner: setCurrentCamera / setCurrentCameraSet, then setMode(mode, true)
+                    SimAction::SetDrivableCamera(view) => camera.set_drivable(view),
+                    SimAction::SetCameraModeKept(mode) => {
+                        (start_camera, mouse_camera) = (None, None);
+                        camera.set_mode_kept(mode);
+                    }
+                    SimAction::SetTrackCameraSet(set) => track_cameras.set_current_set(set.max(0) as usize),
+                }
+            }
+            // Task 34: the chat's lines and the votes to the client (the physics thread's)
+            let requests = gui.take_online_requests();
+            if !requests.is_empty() {
+                shared.online_requests.lock().unwrap().extend(requests);
+            }
+            // ACClient::update's last lines: ten seconds after the player was put out the game
+            // closes
+            if gui.disconnect_over() {
+                shutdown = true;
+            }
+            // what the replay's bar reads of the replay manager and the cameras; the bar shows
+            // while the replay is watched
+            if let Some(rig) = &rig {
+                let rig = rig.lock().unwrap();
+                let link = &mut gui.gui.sim.replay;
+                if let Some(manager) = &rig.manager {
+                    link.status = manager.status;
+                    link.time_mult = manager.time_mult;
+                    rustyac_game::shm::REPLAY_TIME_MULT.store(manager.time_mult.to_bits(), Ordering::Relaxed);
+                    link.slow_mo_level = manager.slow_mo_level;
+                    link.current_frame = manager.current_frame;
+                    link.recorded_frames = manager.recorded_frames;
+                    link.cut_in = manager.cut_in;
+                    link.cut_out = manager.cut_out;
+                    link.has_loaded_replay = manager.has_loaded_replay;
+                    link.record_interval_ms = manager.record_interval_ms;
+                    link.lap_marks = if focus.index < manager.recorders.len() { manager.get_normalized_lap_change(focus.index) } else { Vec::new() };
+                }
+                link.auto_file_name = rig.auto_file_name();
+                // (the spinner's entries after the cockpit and the drivable views: getCameraSetName)
+                link.track_camera_sets = track_cameras.sets.iter().map(|set| set.name.clone()).collect();
+                link.camera_manager = true;
+                if let Some(on) = options.post {
+                    link.post_processing = Some(on);
+                }
+                let watching = rig.in_replay_mode();
+                drop(rig);
+                gui.replay_bar_show(watching);
+                if let Some(index) = camera.global_index().filter(|index| *index != gui.gui.sim.replay.camera_index) {
+                    gui.replay_camera_index(index);
+                }
+            }
+        }
+        if shutdown {
+            break;
+        }
+        let toggles = shared.camera_toggles.load(Ordering::Relaxed);
+        if toggles != camera_toggles {
+            camera_toggles = toggles;
+            // the pad's camera button is F1 in the game too
+            onboard_free::f1(&mut camera, &mut start_camera, &mut mouse_camera);
+        }
+        if thread.is_finished() || STOP.load(Ordering::Relaxed) || options.duration.is_some_and(|d| started.elapsed().as_secs_f64() >= d) {
+            break;
+        }
+        let now = Instant::now();
+        let dt = now - last;
+        last = now;
+        // Game::onIdle: Time Attack and Drift once per drawn frame, with GameTime's deltaT
+        // (a recorded drive's replay keeps the referee's 9 ms frame, as when it was recorded headless)
+        game_time.update(dt.as_secs_f64() * 1000.0);
+        if replay.is_none() && game_time.delta_t > 0.0 {
+            shared.drawn_frames.lock().unwrap().push(game_time.delta_t);
+        }
+        world = shared.world_at(now);
+        // Task 28c: --replay-script for a replay of recorded frames; then the replay's frame
+        // (ReplayManager::updatePlayState): every car's state from its recorder
+        let (mut ac_replay_line, mut ac_replay_events, mut ac_replay_scale) = (None, Vec::new(), 1.0f32);
+        if let Some(rig) = &rig {
+            let mut rig = rig.lock().unwrap();
+            rig.focused_car = focus.index;
+            while let (true, Some(at)) = (transport.is_none(), script.first().map(|(at, _)| *at).filter(|at| started.elapsed().as_secs_f64() >= *at)) {
+                let (_, name) = script.remove(0);
+                match name.as_str() {
+                    "replay" => enter_replay(&mut rig, &shared, is_online),
+                    "exit" => leave_replay(&mut rig, &shared, is_online),
+                    "save" => save_replay(&mut rig),
+                    "pause" => rig.key(ReplayKey::PlayPause),
+                    "slow" => rig.key(ReplayKey::SlowMotion),
+                    "ffwd" => rig.key(ReplayKey::FastForward),
+                    "rewind" => rig.key(ReplayKey::Rewind),
+                    "frame" => rig.key(ReplayKey::NextFrame),
+                    "nextlap" => rig.key(ReplayKey::NextLap),
+                    "prevlap" => rig.key(ReplayKey::PreviousLap),
+                    _ => rig.key(ReplayKey::Stop),
+                }
+                println!("replay script at {at:.2} s: {name} -> {}", rig.status_line());
+            }
+            if rig.in_replay_mode() {
+                let track = shared.track.lock().unwrap().clone();
+                for event in rig.frame(dt.as_secs_f32(), track.as_deref()) {
+                    match event {
+                        ReplayEvent::StatusChanged { status, time_mult, slow_motion_level } => ac_replay_events.push((status, time_mult, slow_motion_level)),
+                        ReplayEvent::Audio(on) => ac_replay_audio = on,
+                        _ => {}
+                    }
+                }
+                for (i, view) in world.iter_mut().enumerate() {
+                    let Some(state) = rig.states.get(i) else { continue };
+                    let mut shown = rustyac_game::ac_replay::view_of(view, state);
+                    let wings = rig.wings(i);
+                    shown.wing_count = wings.len().min(8) as u8;
+                    shown.wing_angles[..shown.wing_count as usize].copy_from_slice(&wings[..shown.wing_count as usize]);
+                    shown.disconnected = !rig.car_shows(i);
+                    *view = shown;
+                }
+                // the loose objects as the scene's frames have them (a file that counts them
+                // differently than this track does was written with objects a patch added, or
+                // is another track's: then they stay where they are)
+                let same_objects = track.as_ref().is_some_and(|track| track.objects.len() == rig.objects.len());
+                if let (true, Some(first)) = (same_objects, world.first_mut()) {
+                    let count = rig.objects.len().min(rustyac_game::view::MOVED_OBJECTS);
+                    for (number, matrix) in rig.objects.iter().take(count).enumerate() {
+                        first.moved_objects[number] = (number as u16, matrix.m);
+                    }
+                    first.moved_object_count = count as u8;
+                }
+                // offline the physics stands: the shared memory page follows the replayed car
+                if let (false, Some(state)) = (is_online, rig.states.first()) {
+                    let m = state.world_matrix.m[3];
+                    let mut frames = rustyac_game::shm::REPLAY_FRAMES.lock().unwrap();
+                    // (bounded: with --no-shm nobody takes them)
+                    if frames.len() < 1024 {
+                        frames.push([m[0], m[1], m[2]]);
+                    }
+                }
+                renderer.set_replay_states(Some(rig.states.clone()));
+                if let Some(sound) = audio.as_mut() {
+                    sound.set_replay_states(&rig.states);
+                }
+                ac_replay_scale = rig.manager.as_ref().map_or(1.0, |manager| manager.time_mult);
+                ac_replay_line = Some(rig.status_line());
+            } else {
+                renderer.set_replay_states(None);
+            }
+            for line in rig.messages.drain(..) {
+                println!("{line}");
+            }
+        }
+        // --focus-script: the focus keys by the clock
+        while let Some(at) = focus_script.first().map(|(at, _)| *at).filter(|at| started.elapsed().as_secs_f64() >= *at) {
+            let (_, name) = focus_script.remove(0);
+            let command = match name.as_str() {
+                "next" => FocusCommand::Next,
+                "previous" => FocusCommand::Previous,
+                "track" => FocusCommand::TrackCamera,
+                "random" => FocusCommand::RandomCamera,
+                "onboard" => FocusCommand::OnboardFreeCamera,
+                _ => FocusCommand::Player,
+            };
+            println!("focus script at {at:.2} s: {name}");
+            focus.command(command, &world, &car_names);
+        }
+        // the fade of a change of the focused car, as this frame shows it
+        let focus_fade = focus.for_picture();
+        if focus.index >= world.len() {
+            focus.index = 0;
+        }
+        let view = world[focus.index];
+        // FormOpenVR: the pupillary distance and supersampling on the HTC Vive camera
+        for action in renderer.gui().map(|gui| std::mem::take(&mut gui.apps.vr_actions)).unwrap_or_default() {
+            renderer.open_vr_action(&action);
+        }
+        // the photo app's edits of the scene camera's depth of field and of the exposure multiplier
+        let mut photo_edit = None;
+        // Onboard settings: the player's eye point, field of view and pitch as the app left them
+        if let Some(gui) = renderer.gui() {
+            if gui.apps.made.is_empty() {
+                gui.apps.onboard = (shapes[0].eye_model, shapes[0].onboard_fov, shapes[0].eye_pitch);
+                gui.gui.apps.chase_cam = camera.chase[0];
+            } else if std::mem::take(&mut gui.apps.onboard_changed) {
+                let (eyes, fov, pitch) = gui.apps.onboard;
+                shapes[0].set_eye_model(eyes);
+                shapes[0].onboard_fov = fov;
+                shapes[0].eye_pitch = pitch;
+            }
+            // the ChaseCam Editor's spinners move the first chase camera at once
+            if !gui.apps.made.is_empty() {
+                camera.chase[0] = gui.gui.apps.chase_cam;
+            }
+            // Keyboard debug: the keyboard's parameters as of the last step, the app's edits to it
+            {
+                let mut tuning = shared.keyboard_tuning.lock().unwrap();
+                for (index, value) in std::mem::take(&mut gui.apps.keyboard_edits) {
+                    if let Some(k) = tuning.0.as_mut() {
+                        k[index] = value;
+                    }
+                    tuning.1.push((index, value));
+                }
+                gui.gui.apps.keyboard = tuning.0;
+                let mut tuning = shared.pad_tuning.lock().unwrap();
+                for (index, value) in std::mem::take(&mut gui.apps.pad_edits) {
+                    if let Some(p) = tuning.0.as_mut() {
+                        p[index] = value;
+                    }
+                    tuning.1.push((index, value));
+                }
+                gui.gui.apps.pad = tuning.0;
+            }
+            // Camera editor: its cameras, views and choices for the player's car; the eye point and
+            // pitch come back through the Onboard actions
+            // (FormCamera::selectCamera: setMode(mode, false, false), then the index)
+            for (mode, index) in std::mem::take(&mut gui.apps.camera_selects) {
+                onboard_free::set_mode(mode, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), shapes[focus.index].car_cameras.len(), cinematic.is_some(), &mut track_cameras);
+                camera.select_index(mode, index, shapes[focus.index].car_cameras.len());
+            }
+            if let Some(l) = gui.gui.apps.camera_editor.as_mut().filter(|_| gui.apps.app("cameraeditor").is_some()) {
+                shapes[0].car_cameras = l.cameras.iter().map(|c| rustyac_game::render::scene::CarCamera { matrix: c.matrix.m, fov: c.fov }).collect();
+                (shapes[0].bumper_pos, shapes[0].bumper_pitch, shapes[0].bonnet_pos, shapes[0].bonnet_pitch) = (l.bumper_pos, l.bumper_pitch, l.bonnet_pos, l.bonnet_pitch);
+                (l.eyes, l.onboard_pitch) = (shapes[0].eye_model, shapes[0].eye_pitch);
+                l.body = rustyac_physics::vecmath::Mat44f { m: rustyac_game::render::scene::model_matrix(&world[0].body, &shapes[0]) };
+                if let Some(frame) = &last_frame {
+                    l.scene_camera = rustyac_physics::vecmath::Mat44f { m: frame.matrix };
+                }
+            }
+            // Photo mode: Start (the free camera, the physics paused), screenshots; its field of
+            // view and roll move the free camera
+            for action in std::mem::take(&mut gui.apps.photo_actions) {
+                match action {
+                    // (AppPhotoMode's Start: setMode(eFree), then back to the mode it found)
+                    rustyac_gui::apps::AppAction::SetCameraMode(mode) => onboard_free::set_mode(mode, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), shapes[focus.index].car_cameras.len(), cinematic.is_some(), &mut track_cameras),
+                    rustyac_gui::apps::AppAction::PausePhysics(paused) => shared.paused.store(paused, Ordering::Relaxed),
+                    rustyac_gui::apps::AppAction::TakeScreenshot => gui.take_screen(),
+                    _ => {}
+                }
+            }
+            let p = &mut gui.gui.apps.photo;
+            if let Some(free) = mouse_camera.as_mut().filter(|_| p.matrix != photo_seen.matrix || p.fov != photo_seen.fov) {
+                free.matrix = p.matrix.m;
+                free.fov = p.fov;
+            }
+            photo_sun = p.custom_sun;
+            photo_edit = Some((((p.dof_factor, p.dof_focus) != (photo_seen.dof_factor, photo_seen.dof_focus)).then_some([p.dof_factor, p.dof_focus]), p.exposure_multiplier));
+            gui.gui.apps.chase_cam_active = camera.mode == rustyac_game::render::scene::CameraMode::Drivable && camera.drivable == rustyac_game::render::scene::Drivable::Chase;
+            // SAFETY: a plain call.
+            gui.apps.ctrl_down = shared.focused.load(Ordering::Relaxed) && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) } != 0;
+            // SAFETY: plain calls.
+            gui.apps.suspension_keys = [0x08, 0x11, 0x61, 0x62, 0x63, 0x64].map(|vk| shared.focused.load(Ordering::Relaxed) && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) } != 0);
+        }
+        if let (Some((dof, exposure)), Some((scene_dof, multiplier))) = (photo_edit, renderer.dof_and_exposure()) {
+            *scene_dof = dof.unwrap_or(*scene_dof);
+            *multiplier = exposure;
+        }
+        let mut track_look = None;
+        // ACCameraManager::update: the random camera's next draw
+        let mut rand = camera.cockpit.rand;
+        let shown = camera.random.then(|| camera.name());
+        random_camera.update(dt.as_secs_f32(), &mut camera, shapes[focus.index].car_cameras.len(), &mut track_cameras, &mut rand);
+        camera.cockpit.rand = rand;
+        if shown.is_some_and(|shown| shown != camera.name()) {
+            println!("RANDOM CAMERA: {}", camera.name());
+        }
+        let mut blur_switched = false;
+        let frame = if let Some(start) = start_camera.as_mut() {
+            start.update(&world[0], shapes[0].eye_model[0], dt.as_secs_f32())
+        } else if let Some(free) = mouse_camera.as_mut() {
+            if shared.focused.load(Ordering::Relaxed) {
+                // SAFETY: plain calls.
+                let input = unsafe {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+                    let mut cursor = windows::Win32::Foundation::POINT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cursor);
+                    let held = |vk: i32| GetAsyncKeyState(vk) != 0;
+                    MouseCameraInput { shift: held(0x10), ctrl: held(0x11), up: held(0x26), down: held(0x28), left: held(0x25), right: held(0x27), look: held(0x02), cursor: (cursor.x, cursor.y) }
+                };
+                free.update(&input, dt.as_secs_f32())
+            } else {
+                free.frame()
+            }
+        } else if let Some(mode) = camera.shown {
+            // ACCameraManager::update: the helicopter (4), F5 (5) or the cinematic F7 (6) on
+            // the scene camera
+            let shot = shot.get_or_insert_with(|| ShotCamera::new(last_frame.as_ref().unwrap_or(&CameraFrame { matrix: rustyac_game::view::IDENTITY, fov: 60.0, near: 0.1 })));
+            let input = orbit_input(shared.focused.load(Ordering::Relaxed));
+            let body = rustyac_game::render::scene::model_matrix(&view.body, &shapes[focus.index]);
+            let in_replay = rig.as_ref().is_some_and(|rig| rig.lock().unwrap().in_replay_mode()) || replay.is_some();
+            // (the shot cameras write the one scene camera's depth of field, which the other modes
+            // and the photo app share)
+            if let Some((dof, _)) = renderer.dof_and_exposure() {
+                [shot.dof[0], shot.dof[1]] = *dof;
+            }
+            let cursor = match (mode, cinematic.as_mut()) {
+                (4, _) => {
+                    helicopter.update(shot, &body);
+                    None
+                }
+                (6, Some(cinematic)) => {
+                    // Insert: loadSettingsFromINI again
+                    if input.held(0x2d) {
+                        let [video, track, _] = rustyac_game::render::onboard_free::settings(Some(&cfg_dir(options)));
+                        cinematic.read_settings(video.as_ref(), track.as_ref());
+                    }
+                    if cinematic.blur_switch(&input) {
+                        blur_switched = true;
+                    }
+                    let (cursor, message) = cinematic.update(shot, &input, dt.as_secs_f32());
+                    if let Some(message) = message {
+                        println!("SYSTEM MESSAGE: {message}");
+                    }
+                    cursor
+                }
+                // (the sim's HDR levels set only the exposure's range, which the picture does not use)
+                _ => onboard_free.update(shot, &body, options.ac_replay.is_some() || replay.is_some(), in_replay, [0.0; 2], &input, dt.as_secs_f32()),
+            };
+            if let Some((x, y)) = cursor {
+                // SAFETY: a plain call.
+                let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y) };
+            }
+            if let Some((dof, _)) = renderer.dof_and_exposure() {
+                *dof = [shot.dof[0], shot.dof[1]];
+            }
+            shot.frame()
+        } else if let Some(still) = last_frame.filter(|_| camera.mode == rustyac_game::render::scene::CameraMode::Track && track_cameras.sets.is_empty()) {
+            // CameraTrack::update without sets does nothing: the scene camera stays where it was
+            still
+        } else if camera.mode == rustyac_game::render::scene::CameraMode::Track && !track_cameras.sets.is_empty() {
+            // CameraTrack::update: in a replay dt times the replay's speed (slow motion, fast
+            // forward, rewind, pause)
+            let speed = rig.as_ref().and_then(|rig| rig.lock().unwrap().manager.as_ref().filter(|m| m.replay_mode).map(|m| m.time_mult));
+            camera.track_set = track_cameras.current_set;
+            track_cameras.still = shared.paused.load(Ordering::Relaxed);
+            let body = rustyac_game::render::scene::model_matrix(&view.body, &shapes[focus.index]);
+            let previous = last_frame.as_ref().map_or(rustyac_game::view::IDENTITY, |f| f.matrix);
+            let look = track_cameras.update(&previous, &body, renderer.steer_place(focus.index), view.lap.position, view.speed_ms, speed.map_or(dt.as_secs_f32(), |speed| dt.as_secs_f32() * speed)).expect("the track has cameras");
+            let frame = CameraFrame { matrix: look.matrix, fov: look.fov, near: look.near };
+            track_look = Some(look);
+            frame
+        } else {
+            // the look keys are the focused car's (`actionsState`): the player's, or none
+            camera.actions = if focus.index == 0 { shared.look.load(Ordering::Relaxed) } else { 0 };
+            // ViveManager::update: car 0's look left and look right held together recentre
+            if camera.vr && shared.look.load(Ordering::Relaxed) & 3 == 3 {
+                renderer.vr_recentre();
+            }
+            rustyac_game::steam::run_callbacks();
+            camera.head = head_tracker.as_ref().filter(|_| camera.mode == CameraMode::Cockpit).map(|t| t.poll());
+            camera.update(&view, &shapes[focus.index], view.acc_g, dt.as_secs_f32())
+        };
+        renderer.set_track_look(track_look.take().as_ref());
+        // SAFETY: a plain call.
+        let end_key = (shared.focused.load(Ordering::Relaxed) && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x23) } != 0) || renderer.gui().is_some_and(|g| g.end_held);
+        let end_pick = end_key.then(|| renderer.pick_centre(frame.fov, &rustyac_physics::vecmath::Mat44f { m: frame.matrix }));
+        let scene_dof = renderer.dof_and_exposure().map(|(dof, _)| *dof);
+        if let Some(gui) = renderer.gui() {
+            let p = &mut gui.gui.apps.photo;
+            (p.matrix, p.fov) = (rustyac_physics::vecmath::Mat44f { m: frame.matrix }, frame.fov);
+            if let Some([factor, focus]) = scene_dof {
+                (p.dof_factor, p.dof_focus) = (factor, focus);
+            }
+            p.end_pick = end_pick;
+            p.camera_mode = if mouse_camera.is_some() { 6 } else { camera.manager_mode() };
+            p.in_replay = rig.as_ref().is_some_and(|rig| rig.lock().unwrap().in_replay_mode()) || transport.is_some() || replay.is_some();
+            // SAFETY: plain calls.
+            [p.right_button, p.middle_button] = [0x02, 0x04].map(|vk| shared.focused.load(Ordering::Relaxed) && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) } != 0);
+            photo_seen = *p;
+        }
+        renderer.set_custom_sun(photo_sun);
+        if let (true, Picture::Ac(r)) = (blur_switched, &mut renderer) {
+            r.switch_motion_blur();
+        }
+        last_frame = Some(frame);
+        let replay_over = replay.is_some() && shared.finished.load(Ordering::Relaxed);
+        let unfocused = !options.no_focus && !shared.focused.load(Ordering::Relaxed);
+        // --new-session-at: N by the clock
+        if new_session_at.is_some_and(|at| started.elapsed().as_secs_f64() >= at) {
+            new_session_at = None;
+            shared.requests.fetch_or(event::REBUILD, Ordering::Relaxed);
+            println!("new session (N) at step {}", shared.steps.load(Ordering::Relaxed));
+        }
+        // --replay-script: the keys by the clock
+        if let Some(rm) = transport.as_mut() {
+            while let Some(at) = script.first().map(|(at, _)| *at).filter(|at| started.elapsed().as_secs_f64() >= *at) {
+                let (_, name) = script.remove(0);
+                match name.as_str() {
+                    "pause" => rm.key_pause(),
+                    "slow" => rm.key_slow_motion(),
+                    "ffwd" => rm.fast_forward(),
+                    _ => {
+                        rm.stop();
+                        shared.replay_restart.store(true, Ordering::Relaxed);
+                    }
+                }
+                println!("replay script at {at:.2} s: {name} -> status {}, speed {} (step {})", rm.status, rm.time_mult, shared.steps.load(Ordering::Relaxed));
+            }
+        }
+        // ReplayManager::updatePlayState, before the cars update: the speed of this frame
+        let (mut replay_events, mut replay_scale, mut replay_state, mut replay_sound) = (Vec::new(), 1.0f32, String::new(), true);
+        if let Some(rm) = transport.as_mut() {
+            use rustyac_game::replay_manager::{FAST_FORWARD, PAUSE, SLOW_MOTION, STOP};
+            // the replay pauses itself at its end
+            if replay_over && rm.status != PAUSE && rm.status != STOP {
+                rm.pause();
+            }
+            replay_scale = rm.update_play_state(dt.as_secs_f32());
+            shared.replay_speed.store(replay_scale.max(0.0).to_bits(), Ordering::Relaxed);
+            replay_events = rm.events.drain(..).map(|e| (e.status, e.time_mult, e.slow_mo_level)).collect();
+            replay_sound = rm.audio_on();
+            replay_state = match rm.status {
+                PAUSE if !replay_over => "REPLAY PAUSED".to_string(),
+                STOP => "REPLAY STOPPED (Ctrl+Space plays)".to_string(),
+                FAST_FORWARD => format!("FAST FORWARD x{replay_scale:.0}"),
+                SLOW_MOTION => format!("SLOW MOTION x{replay_scale:.2}"),
+                _ => String::new(),
+            };
+        }
+        let mut info = HudInfo {
+            fps,
+            fps_counter,
+            frame_ms,
+            frame_max_ms,
+            timing: shared.timing(),
+            paused: ac_replay_line.is_none() && (shared.paused.load(Ordering::Relaxed) || unfocused),
+            camera: camera.name(),
+            replay: replay.is_some() || ac_replay_line.is_some(),
+            replay_over,
+            replay_events: if ac_replay_line.is_some() { ac_replay_events } else { replay_events },
+            replay_scale: if ac_replay_line.is_some() { ac_replay_scale } else { replay_scale },
+            replay_transport: transport.is_some() || ac_replay_line.is_some(),
+            replay_state: ac_replay_line.clone().unwrap_or(replay_state),
+            notes: shared.online_hud.lock().unwrap().clone(),
+            online: shared.online_gui.lock().unwrap().clone(),
+            hidden: !debug_hud,
+            focus_fade,
+            referee: shared.referee_hud.lock().unwrap().clone(),
+        };
+        // Task 28: the start lights count down to the referee's race start
+        if let Some(referee) = &info.referee {
+            renderer.set_race_start_in(referee.time_to_start_ms);
+            renderer.set_lights_disqualified(referee.lights_disqualified);
+        }
+        if focus.index != 0 {
+            info.notes.push(format!("camera on car {} ({}): Ctrl+{} is your car", focus.index, car_names[focus.index], rustyac_game::input::bindings::key_name(bindings.key_player_car)));
+        }
+        if replay_over {
+            info.notes.push("the replay is over (Esc)".to_string());
+        } else if unfocused {
+            info.notes.push("click the window to drive".to_string());
+        }
+        // Game::update: the car's one backfire test (CarAvatar::update), whose event the sound
+        // and the flames both hear; the flames empty its counter
+        // the pit crew's wheel guns: what the crew will ask of them in this frame (the gun of
+        // each mechanic who is unscrewing or screwing, when his car is the focused one)
+        let guns = renderer.crew_guns_wanted();
+        if let (Some(sound), Some(link)) = (audio.as_mut(), renderer.crew_link()) {
+            for (wheel, wanted) in guns.iter().enumerate() {
+                if let (Some(screw), true) = (*wanted, focus.index == 0) {
+                    link.playing[wheel][screw as usize] = sound.crew_is_playing(wheel, screw);
+                }
+            }
+        }
+        // (the free camera is ACCameraManager's eFree too: the GUI's and Python's camera mode)
+        let mut shown = camera;
+        shown.shown = if mouse_camera.is_some() { Some(6) } else { camera.shown };
+        if let Some(gui) = renderer.gui() {
+            gui.python_camera = Some(onboard_free::CameraCopy { camera, start: start_camera, free: mouse_camera, last: last_frame, count: shapes[focus.index].car_cameras.len(), cinematic: cinematic.is_some() });
+        }
+        renderer.draw_world(&world, focus.index, &shapes[focus.index], &shown, &frame, &info, dt.as_secs_f32());
+        // ScreenCapturer::saveScreen 0x140163360: the picture of the scene, into the folder
+        // `screenshots` beside rustyac.exe (the game writes into Documents\Assetto Corsa\screens)
+        if let Some(shot) = renderer.take_pre_gui_shot() {
+            let folder = rustyac_game::conditions::own_dir(options).join("screenshots");
+            let written = shot.and_then(|(width, height, mut pixels)| {
+                rustyac_content::guard::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
+                let path = folder.join(screenshot_name(&car_names[0], options.track.as_deref()));
+                write_png(&path, width, height, &pixels).map(|()| path)
+            });
+            match written {
+                Ok(path) => println!("SCREENSHOT: {}", path.display()),
+                Err(message) => eprintln!("WARNING: screenshot: {message}"),
+            }
+        }
+        if let Some(link) = renderer.crew_link() {
+            use rustyac_game::render::ac::CrewSound;
+            let calls = std::mem::take(&mut link.sound);
+            // the crew's camera: F5 turned on the car, held still, and back at the stop's end
+            for asked in std::mem::take(&mut link.camera) {
+                use rustyac_game::render::ac::CrewCamera;
+                match asked {
+                    CrewCamera::SetMode(mode) => {
+                        let count = shapes[focus.index].car_cameras.len();
+                        onboard_free::set_mode(mode, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), count, cinematic.is_some(), &mut track_cameras);
+                    }
+                    CrewCamera::ForceThetaPhi(theta, phi, radius) => onboard_free.force_theta_phi(theta, phi, radius),
+                    CrewCamera::Lock(locked) => onboard_free.locked = locked,
+                }
+            }
+            link.camera_mode = if mouse_camera.is_some() { 6 } else { camera.manager_mode() };
+            if let Some(sound) = audio.as_mut() {
+                for call in calls {
+                    match call {
+                        CrewSound::Start { wheel, screw, matrix } => sound.crew_start(wheel, screw, &matrix.m),
+                        CrewSound::Stop { wheel, screw } => sound.crew_stop(wheel, screw),
+                    }
+                }
+            }
+        }
+        // Game::evOnPostGui: the focus changes at the fade's black frame
+        focus.post_gui(dt.as_secs_f32(), &world, &car_names);
+        // F3 at its black frame: setMode(eTrack), from the track's cameras CameraTrack::nextSet
+        // (F2: and randomMode on)
+        if focus.camera_change == Some(FocusCommand::OnboardFreeCamera) {
+            focus.camera_change = None;
+            let count = shapes[focus.index].car_cameras.len();
+            onboard_free::set_mode(5, &mut camera, &mut start_camera, &mut mouse_camera, &mut shot, last_frame.as_ref(), count, cinematic.is_some(), &mut track_cameras);
+            println!("ONBOARD FREE CAMERA");
+        }
+        if let Some(change) = focus.camera_change.take() {
+            let overlay = start_camera.take().is_some() | mouse_camera.take().is_some() | camera.shown.take().is_some();
+            if camera.f3() && !overlay {
+                let name = track_cameras.next_set();
+                println!("TRACK CAMERAS: set {} {name}", track_cameras.current_set);
+            }
+            if change == FocusCommand::RandomCamera {
+                camera.random = true;
+                println!("RANDOM CAMERA");
+            }
+        }
+        // Game::renderAudio and AudioEngine::update: after the cameras, before the picture is shown
+        if let Some(sound) = audio.as_mut() {
+            let audio_start = Instant::now();
+            // the Audio app: what it reads of the sound, what it asked of it in this frame
+            if let Some(gui) = renderer.gui() {
+                gui.apps.sound = sound.app_sound();
+                for action in std::mem::take(&mut gui.apps.sound_actions) {
+                    sound.app_action(&action);
+                }
+            }
+            sound.set_focus(focus.index);
+            if options.audio.clockless() {
+                sound.grid_frames(|_| (camera, frame.matrix));
+            } else {
+                sound.set_picture_backfires(&renderer.backfires_triggered());
+                // (ReplayManager::updateReplayAudio: no sound outside half to double speed)
+                sound.frame(&camera, &frame.matrix, dt.as_secs_f64(), info.paused || !replay_sound || (info.replay_transport && transport.is_none() && !ac_replay_audio));
+            }
+            // Game::onIdle times renderAudio + AudioEngine::update; Sim::update reads the FMOD usage
+            let audio_ms = (audio_start.elapsed().as_secs_f64() * 1000.0) as f32 as f64;
+            if let Some(gui) = renderer.gui() {
+                gui.audio_stats(audio_ms, sound.fmod_update_usage());
+            }
+        }
+        // --bench-shot in a window: the picture a quarter of a second before --duration ends
+        if let (Some(path), false, true) = (&options.bench_shot, window_shot, options.duration.is_some_and(|d| started.elapsed().as_secs_f64() >= d - 0.25)) {
+            window_shot = true;
+            match renderer.read_pixels() {
+                Ok(pixels) => {
+                    let (width, height) = renderer.size();
+                    match write_png(path, width, height, &pixels) {
+                        Ok(()) => println!("{}: {width} x {height}, the window's picture", path.display()),
+                        Err(message) => eprintln!("WARNING: {message}"),
+                    }
+                }
+                Err(message) => eprintln!("WARNING: {message}"),
+            }
+        }
+        match renderer.present(&chain, options.vsync) {
+            // nothing is seen: no need to draw as fast as the card can
+            Ok(false) => std::thread::sleep(Duration::from_millis(15)),
+            Ok(true) => {}
+            Err(message) => {
+                result = Err(message);
+                break;
+            }
+        }
+        frames += 1;
+        fps_frames += 1;
+        if frames > 30 {
+            frame_max = frame_max.max(dt);
+        }
+        running_max = running_max.max(dt);
+        if fps_since.elapsed() >= Duration::from_millis(500) {
+            fps = fps_frames as f32 / fps_since.elapsed().as_secs_f32();
+            frame_ms = 1000.0 / fps.max(1e-3);
+            frame_max_ms = running_max.as_secs_f32() * 1000.0;
+            running_max = Duration::ZERO;
+            fps_frames = 0;
+            fps_since = Instant::now();
+        }
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    // what the game writes at its end, into rustyAC's own cfg folder
+    if let Some(gui) = renderer.gui() {
+        match gui.shutdown() {
+            Ok(files) => println!("GUI: wrote {}", files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")),
+            Err(message) => eprintln!("WARNING: the GUI's files were not written ({message})"),
+        }
+    }
+    // Sim::shutdown: the apps' last files
+    if let Some(gui) = renderer.gui() {
+        gui.shutdown_apps();
+    }
+    // ACCameraManager's destructor: the last camera, on rustyAC's copy of camera_manager.ini
+    // (made from Documents' the first time)
+    renderer.vr_shutdown();
+    let file = cfg_dir(options).join("camera_manager.ini");
+    let old = rustyac_content::vfs::read(&file).ok().or_else(|| rustyac_content::install::documents().and_then(|d| rustyac_content::vfs::read(&d.join("cfg/camera_manager.ini")).ok()));
+    match rustyac_content::guard::create_dir_all(cfg_dir(options)).and_then(|()| rustyac_content::guard::write(&file, camera.last_camera_ini(old.as_deref()))) {
+        Ok(()) => println!("CAMERA: {} at the end; wrote {} (last camera {} {})", camera.name(), file.display(), camera.last_camera.0, camera.last_camera.1),
+        Err(e) => eprintln!("WARNING: {} was not written ({e})", file.display()),
+    }
+    shared.quit.store(true, Ordering::Relaxed);
+    let outcome = thread.join().map_err(|_| "the physics thread panicked".to_string())?;
+    drop(chain);
+    drop(window);
+    // SAFETY: as above; the display may sleep again.
+    unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+    let audio_timing = audio.map(GameAudio::finish);
+    let (view, timing) = outcome?;
+    report(&view, &timing);
+    if let Some(audio_timing) = audio_timing {
+        println!("{}", audio_timing.report());
+    }
+    println!(
+        "render: {frames} frames in {seconds:.1} s = {:.1} FPS ({}), slowest frame {:.1} ms",
+        frames as f64 / seconds.max(1e-9),
+        if options.vsync { "waiting for the display" } else { "not waiting for the display" },
+        frame_max.as_secs_f64() * 1000.0
+    );
+    result
+}
+
+/// `--screenshot <png>`: drives for a while without a clock (a recorded drive, or nobody),
+/// then draws one frame off screen and writes it as a PNG. No window is opened.
+fn run_screenshot(options: &Options, path: &Path) -> Result<(), String> {
+    let (setup, steps) = drive(options)?;
+    let source: Box<dyn DriverSource> = if steps.is_some() {
+        Box::new(ReplaySource::default())
+    } else if options.autodrive {
+        Box::new(SpawnSequence::new(AutoDriver::new(), true))
+    } else if options.flat_out {
+        Box::new(SpawnSequence::new(rustyac_game::sim::FlatOutSource::with_brake(options.flat_out_brake), true))
+    } else {
+        Box::new(SpawnSequence::new(NobodySource, true))
+    };
+    // with the line follower the drive can be kept: it runs without a clock, so a lap takes seconds
+    let mut writer = match (&options.record, steps.is_none()) {
+        (Some(path), true) => Some(InputWriter::create(path, &setup)?),
+        _ => None,
+    };
+    let mut sim = GameSim::new(setup, source)?;
+    if !sim.track_summary.is_empty() {
+        println!("{}", sim.track_summary);
+    }
+    let wanted = options.at.map(|seconds| (seconds / 0.003).round() as usize);
+    // --lead-in: the car as it was every 1/60 s over the last seconds
+    let total = wanted.unwrap_or(1000);
+    let lead_from = total.saturating_sub((options.lead_in / 0.003).round() as usize);
+    let mut lead: Vec<Vec<CarView>> = Vec::new();
+    let mut lead_due = 0.0f64;
+    // the Telemetry app's steps of the lead-in, handed over with each of its frames
+    let telemetry_names: Vec<String> = rustyac_gui::app_telemetry::channels(&rustyac_game::view::telemetry_car(&sim)).into_iter().map(|c| c.name).collect();
+    let mut telemetry_steps: Vec<(f64, Vec<f32>)> = Vec::new();
+    let mut lead_telemetry: Vec<Vec<(f64, Vec<f32>)>> = Vec::new();
+    let mut drive_start = 0;
+    let mut previous = CarView::capture(&sim, 0.0);
+    match &steps {
+        Some(steps) => {
+            for step in steps.iter().take(wanted.unwrap_or(steps.len())) {
+                previous = CarView::capture(&sim, 0.0);
+                sim.step_recorded(step)?;
+            }
+        }
+        None => {
+            for i in 0..total {
+                if sim.car.device.source.in_spawn_sequence() {
+                    drive_start = sim.steps + 1;
+                }
+                previous = CarView::capture(&sim, 0.0);
+                if options.lead_in > 0.0 && i >= lead_from {
+                    lead_due += 0.003;
+                    if lead_due >= 1.0 / 60.0 {
+                        lead_due -= 1.0 / 60.0;
+                        lead.push(CarView::capture_world(&sim, sim.steps.saturating_sub(drive_start) as f64 * 0.003));
+                        lead_telemetry.push(std::mem::take(&mut telemetry_steps));
+                    }
+                }
+                let input = sim.step()?;
+                if options.lead_in > 0.0 && i >= lead_from {
+                    telemetry_steps.push((sim.sim_seconds() * 1000.0, rustyac_game::view::telemetry_values(&sim, &telemetry_names)));
+                }
+                if let Some(writer) = &mut writer {
+                    writer.push(&input)?;
+                }
+            }
+            if let Some(writer) = writer.take() {
+                println!("{} steps of the drive written to {}", writer.finish()?, options.record.as_ref().unwrap().display());
+                rustyac_game::input_file::write_setup_jobs(options.record.as_ref().unwrap(), &sim.setup_log)?;
+                rustyac_game::input_file::write_pit_jobs(options.record.as_ref().unwrap(), &sim.pit_log)?;
+            }
+        }
+    }
+    let mut view = CarView::capture(&sim, sim.steps.saturating_sub(drive_start) as f64 * 0.003);
+    // --show-lights, --show-damage: the picture's own switches
+    let dress = |v: &mut CarView| {
+        v.lights |= options.show_lights;
+        if let Some(damage) = options.show_damage {
+            v.damage = damage;
+        }
+    };
+    dress(&mut view);
+    lead.iter_mut().flatten().for_each(dress);
+    if let Some(pose) = &options.pose_out {
+        rustyac_content::guard::write(pose, view.physics_state().to_bytes()).map_err(|e| format!("{}: {e}", pose.display()))?;
+        println!("{}: the car's state after {} steps", pose.display(), sim.steps);
+    }
+    // the cars of the picture and the one the camera is on (--focus)
+    let other_infos = sim.opponent_infos();
+    let focus = options.focus.min(other_infos.len());
+    let mut world = CarView::capture_world(&sim, sim.steps.saturating_sub(drive_start) as f64 * 0.003);
+    world.iter_mut().for_each(dress);
+    let previous = if focus == 0 { previous } else { world[focus] };
+    let view = world[focus];
+    let mut shape = CarShape::of(&if focus == 0 { sim.car_info() } else { other_infos[focus - 1].clone() });
+    // what the Onboard settings app saved in rustyAC's own cfg: the car's own eye point, the
+    // player's car's pitch
+    {
+        let unix_of = |name: &str| Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let unix = unix_of(&if focus == 0 { sim.car_info() } else { other_infos[focus - 1].clone() }.name);
+        shape.apply_saved_car_files(&cfg_dir(options), &unix);
+        shape.apply_own_onboard(&cfg_dir(options), &unix, &unix_of(&sim.car_info().name));
+    }
+    // --supersample: the picture is drawn larger and averaged down at the end
+    let supersample = options.supersample.max(1);
+    let mut renderer = make_picture(options, options.width * supersample, options.height * supersample, &sim.car_info(), &other_infos)?;
+    let mut camera = DrivingCamera::from_name(&options.camera, &shape)?;
+    // --free-camera: it stands where the car of the picture puts it, in the lead-in frames too
+    let free = options.free_camera.map(|free| CameraFrame { matrix: free_camera(&view.body, free.eye, free.look), fov: free.fov, near: 0.1 });
+    if options.virtual_mirror {
+        renderer.set_virtual_mirror(true);
+    }
+    // --no-hud: the virtual mirror is part of the display (a preset may have switched it on)
+    if options.no_hud {
+        renderer.set_virtual_mirror(false);
+    }
+    // rustyAC's own panels: with --debug-hud, or when AC's HUD is not there
+    let text_hidden = options.no_hud || !(options.debug_hud || renderer.gui().is_none());
+    {
+        let first = sim.car_info();
+        let own;
+        let car0 = if focus == 0 {
+            &shape
+        } else {
+            own = CarShape::of(&first);
+            &own
+        };
+        let unix = Path::new(&first.name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        start_camera_editor(&mut renderer, options, &unix, &first.data_path, car0);
+    }
+    if let (Some(commands), Some(gui)) = (&options.gui_do, renderer.gui()) {
+        gui.script(commands)?;
+    }
+    let lead_info = HudInfo { fps: 0.0, fps_counter: options.show_fps, camera: camera.name(), replay: steps.is_some(), hidden: text_hidden, referee: sim.referee_hud(), ..HudInfo::default() };
+    for (k, old_world) in lead.iter().enumerate() {
+        if let Some(gui) = renderer.gui() {
+            gui.telemetry_exchange(lead_telemetry.get(k).cloned().unwrap_or_default());
+        }
+        let old = &old_world[focus.min(old_world.len() - 1)];
+        let frame = camera.update(old, &shape, old.acc_g, 1.0 / 60.0);
+        let frame = free.unwrap_or(frame);
+        renderer.draw_world(old_world, focus, &shape, &camera, &frame, &lead_info, 1.0 / 60.0);
+    }
+    // two frames, so that the chase camera has leaned into the car's acceleration
+    camera.update(&previous, &shape, previous.acc_g, 1.0 / 60.0);
+    let frame = camera.update(&view, &shape, view.acc_g, 1.0);
+    let frame = free.unwrap_or(frame);
+    let info = HudInfo { fps: 0.0, fps_counter: options.show_fps, camera: camera.name(), replay: steps.is_some(), hidden: text_hidden, referee: sim.referee_hud(), ..HudInfo::default() };
+    // two frames: the second is a frame as the game draws them one after the other (the first
+    // after loading still uploads and binds everything)
+    let dt = if lead.is_empty() { 0.0 } else { 1.0 / 60.0 };
+    // (the motion blur smears by the camera's movement since the frame before: the second draw
+    // starts from the same "frame before" as the first)
+    let blur = renderer.blur_history();
+    if let Some(gui) = renderer.gui() {
+        gui.telemetry_exchange(telemetry_steps);
+    }
+    renderer.draw_world(&world, focus, &shape, &camera, &frame, &info, dt);
+    renderer.set_blur_history(blur);
+    renderer.draw_world(&world, focus, &shape, &camera, &frame, &info, dt);
+    let mut pixels = renderer.read_pixels()?;
+    let (mut width, mut height) = renderer.size();
+    if supersample > 1 {
+        (width, height) = (width / supersample, height / supersample);
+        pixels = box_downscale(&pixels, width, height, supersample);
+    }
+    write_png(path, width, height, &pixels)?;
+    println!("{}: {width} x {height}, drawn by {} after {} steps ({:.1} km/h, gear {})", path.display(), renderer.describe(), sim.steps, view.speed_kmh, view.gear - 1);
+    if let Some(stats) = renderer.frame_stats() {
+        println!("  {stats}");
+    }
+    // the cars of the picture: where each is and how hard it has been hit
+    if world.len() > 1 {
+        for (number, car) in world.iter().enumerate() {
+            println!(
+                "  car {number}{}: at {:.1} {:.1} {:.1} heading {:.0} deg, {:.1} km/h, {:.1} % round the lap, damage front / rear / left / right {:.0} / {:.0} / {:.0} / {:.0}",
+                if number == focus { " (the camera's)" } else { "" },
+                car.body[3][0],
+                car.body[3][1],
+                car.body[3][2],
+                car.body[2][0].atan2(car.body[2][2]).to_degrees(),
+                car.speed_kmh,
+                car.lap.position.clamp(0.0, 1.0) * 100.0,
+                car.damage[0],
+                car.damage[1],
+                car.damage[2],
+                car.damage[3]
+            );
+        }
+    }
+    lap_report(&view);
+    Ok(())
+}
+
+/// `--replay <file> --headless --audio-wav <wav>`: a recorded drive as fast as it goes, its
+/// sound written without a clock: one frame of the sound (one 1/60 s block of the WAV) after
+/// every `floor(n * 50 / 9)` physics steps, the listener at the camera of `--camera`.
+fn run_replay_audio(options: &Options, replay: &Path) -> Result<(), String> {
+    let file = rustyac_game::input_file::InputFile::read(replay)?;
+    let started = Instant::now();
+    let audio = GameAudio::replay(&audio_options(options), file.setup.clone(), &file.steps, &options.camera, options.focus)?;
+    let timing = audio.finish();
+    println!("{}", timing.report());
+    eprintln!("replayed {} steps ({:.1} s of driving) with sound in {:.2} s", file.steps.len(), file.steps.len() as f64 * 0.003, started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn run(options: &Options) -> Result<(), String> {
+    if options.list_tracks {
+        print!("{}", list_tracks());
+        return Ok(());
+    }
+    if options.list_devices {
+        let mut notes = Vec::new();
+        let bindings = Bindings::load(options, &mut notes);
+        for note in &notes {
+            println!("bindings: {note}");
+        }
+        let wheel = WheelDevice::open(&bindings, 0, false);
+        print!("{}{}", list_devices(&bindings, &wheel), bindings.describe());
+        return Ok(());
+    }
+    // which maths this run computes with (on the error stream where the standard output may
+    // be carrying a state dump)
+    if options.dump_states.is_some() {
+        eprintln!("{}", rustyac_math::describe());
+    } else {
+        println!("{}", rustyac_math::describe());
+    }
+    // Task 28c: --replay with one of AC's replays: the file names the track and the cars; they
+    // are built as a session whose physics stands still, and the replay shows
+    if let Some(file) = options.replay.clone().filter(|file| rustyac_game::ac_replay::is_ac_replay(file)) {
+        let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let header = rustyac_game::ac_replay::read_header(&bytes)?;
+        let first = header.cars.first().ok_or("the replay has no car")?;
+        let mut o = options.clone();
+        o.ac_replay = Some(file);
+        o.replay = None;
+        o.headless = false;
+        o.car = first.unix_name.clone();
+        o.skin = Some(first.skin.clone()).filter(|skin| !skin.is_empty());
+        o.track = Some(header.track.clone()).filter(|track| !track.is_empty());
+        o.layout = Some(if header.layout.is_empty() { "-".to_string() } else { header.layout.clone() });
+        o.opponents = header.cars[1..].iter().map(|car| if car.skin.is_empty() { format!("{}:parked", car.unix_name) } else { format!("{}:{}:parked", car.unix_name, car.skin) }).collect();
+        o.cars = None;
+        o.ai_cars = None;
+        o.race_ini = Some(false);
+        o.no_referee = true;
+        o.sessions = None;
+        o.no_shm = true;
+        println!("{}: AC replay version {}: {} on {} {}", o.ac_replay.as_ref().map(|f| f.display().to_string()).unwrap_or_default(), header.version, header.cars.iter().map(|car| car.unix_name.as_str()).collect::<Vec<_>>().join(", "), header.track, header.layout);
+        return run_window(&o);
+    }
+    if let Some(path) = &options.screenshot {
+        return run_screenshot(options, path);
+    }
+    if let (Some(tape), Some(_)) = (&options.sound_tape, &options.audio.wav) {
+        let bytes = std::fs::read(tape).map_err(|e| format!("{}: {e}", tape.display()))?;
+        println!("{}", GameAudio::play_tape(&audio_options(options), &bytes)?.finish().report());
+        return Ok(());
+    }
+    if options.headless {
+        // --drawn-frames: the physics thread's loop, which draws the frames
+        if let (Some(replay), false) = (&options.replay, options.realtime || options.drawn_frames.is_some()) {
+            if options.audio.wav.is_some() && !options.audio.off {
+                return run_replay_audio(options, replay);
+            }
+            // as fast as it goes
+            let started = Instant::now();
+            let ghost = ghost_rig(options);
+            let mut ghost = ghost.as_ref().map(|ghost| ghost.lock().unwrap());
+            let telemetry = telemetry_rig(options, false);
+            let mut telemetry = telemetry.as_ref().map(|rig| rig.lock().unwrap());
+            let steps = rustyac_game::run_replay_headless_saving(replay, options.dump_states.as_deref(), options.state_hash, options.physics_threads, options.save_replay.as_deref().filter(|_| !options.no_ac_replay), ghost.as_deref_mut(), telemetry.as_deref_mut())?;
+            let seconds = started.elapsed().as_secs_f64();
+            // the dump may be going to the standard output
+            eprintln!(
+                "replayed {steps} steps ({:.1} s of driving) in {seconds:.2} s ({:.1} x real time)",
+                steps as f64 * 0.003,
+                steps as f64 * 0.003 / seconds.max(1e-9)
+            );
+            return Ok(());
+        }
+        return run_headless(options);
+    }
+    run_window(options)
+}
+
+pub fn main() {
+    let options = match Options::parse(std::env::args().skip(1)) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
+    if options.documents.is_some() {
+        rustyac_content::install::set_documents(options.documents.clone());
+    }
+    // the proofs (tools/proofs/lib.sh) set this: a run there never reads or writes the player's own files
+    if std::env::var_os("RUSTYAC_PROOF_RUN").is_some() && (options.cfg_dir.is_none() || options.documents.is_none()) {
+        eprintln!("RUSTYAC_PROOF_RUN is set: a proof run needs --cfg-dir and --documents (fresh folders of its own)");
+        std::process::exit(2);
+    }
+    // SAFETY: the handler only touches two atomics.
+    unsafe {
+        let _ = SetConsoleCtrlHandler(Some(console_handler), true);
+    }
+    // the game's SteamInit, when Steam runs and owns the game; never in a proof run, whose
+    // content must not hang on the player's DLCs
+    if !options.no_steam && std::env::var_os("RUSTYAC_PROOF_RUN").is_none() {
+        if let Some(root) = rustyac_content::install::ac_root() {
+            rustyac_game::steam::start(&root);
+        }
+    }
+    let result = run(&options);
+    rustyac_game::steam::stop();
+    DONE.store(true, Ordering::Relaxed);
+    if let Err(message) = result {
+        eprintln!("rustyac: {message}");
+        std::process::exit(1);
+    }
+}

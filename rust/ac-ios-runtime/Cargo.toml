@@ -1,0 +1,28 @@
+[package]
+name = "ac-ios-runtime"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+publish = false
+description = "C ABI exposed to the UIKit shell; runs the real rustyAC simulation core"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+# Real Assetto Corsa engine (GPL-3.0-or-later). These are the actual upstream
+# crates, not reimplementations. Paths are relative to this crate.
+rustyac-game = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-game" }
+rustyac-physics = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-physics" }
+rustyac-content = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-content" }
+
+# iOS-only: the real wgpu Metal chain from CAMetalLayer to rustyAC's kgl device.
+# Target-gated so the Windows host tests keep using the D3D11 build of rustyAC.
+[target.'cfg(target_os = "ios")'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["metal", "wgsl"] }
+rustyac-render = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-render", features = ["backend-wgpu"] }
+# Enables rustyac_game::render::ac (AcRenderer) with the wgpu/kgl backend.
+rustyac-game = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-game", features = ["wgpu"] }
+
+[target.'cfg(not(target_os = "ios"))'.dev-dependencies]
+rustyac-web = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-web", features = ["wgpu"] }

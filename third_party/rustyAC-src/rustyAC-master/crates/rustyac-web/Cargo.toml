@@ -1,0 +1,53 @@
+[package]
+name = "rustyac-web"
+description = "rustyAC in the browser, a preview: the Vanilla physics as WebAssembly, a small wgpu picture (WebGPU, WebGL2 fallback), keyboard and gamepad"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustyac-physics = { path = "../rustyac-physics" }
+rustyac-math = { path = "../rustyac-math" }
+rustyac-content = { path = "../rustyac-content" }
+# the simulation, AC's keyboard and pad classes and the scene maths (its Windows parts are
+# not compiled for wasm)
+rustyac-game = { path = "../rustyac-game" }
+# multiplayer: the client of a Kunos acServer, here through a WebSocket gateway
+rustyac-net = { path = "../rustyac-net" }
+# Full mode: AC's GUI (its language, for the HUD and menus the page draws)
+rustyac-gui = { path = "../rustyac-gui" }
+
+# Full mode: AC's renderer (rustyac-game's `render::ac`); here only for the kgl call log of the
+# fixed frame (`full.rs`). In the page kgl runs on wgpu; natively on Direct3D 11, or on wgpu with
+# the `wgpu` feature (the full_frame example).
+[target.'cfg(any(windows, all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+rustyac-render = { path = "../rustyac-render" }
+
+[features]
+wgpu = ["rustyac-game/wgpu"]
+
+[dev-dependencies]
+# the full_frame example's picture (already in the lock file through rustyac-game)
+png = "0.17"
+
+# Everything below is the browser side and only exists in a wasm build: the desktop build of
+# the workspace compiles this crate's plain logic and its tests, nothing else.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# the picture: WebGPU where the browser has it, WebGL2 otherwise
+wgpu = { version = "=30.0.1", default-features = false, features = ["webgpu", "webgl", "wgsl"] }
+# the glue to JavaScript; the version must be the one of the wasm-bindgen program that
+# `web/build.py` runs (pinned there too)
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "console", "Performance"] }
+console_error_panic_hook = "0.1"
+# AC's launcher in the page: the desktop launcher's own ac:// bridge on the page's files
+rustyac-launcher = { path = "../rustyac-launcher" }
+# the sound's proof in the page (`sound_proof`): the port's sound code on a recorded drive
+rustyac-audio = { path = "../rustyac-audio" }
