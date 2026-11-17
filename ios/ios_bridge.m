@@ -16,7 +16,7 @@ void ac_ios_set_content_root(NSString *path) {
 }
 
 void ac_ios_set_metal_layer(void *layer) {
-    gMetalLayer = (CAMetalLayer *)layer;
+    gMetalLayer = (__bridge CAMetalLayer *)layer;
 }
 
 void ac_ios_set_input(ACIosInputState state) {
