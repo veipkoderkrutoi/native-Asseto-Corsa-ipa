@@ -20,7 +20,7 @@ rust_i = next(i for i, n in enumerate(names) if "static library" in n)
 xcode_i = next(i for i, n in enumerate(names) if "UNSIGNED .app" in n)
 
 checks = [
-    ("runner is macos-15", job["runs-on"] == "macos-15"),
+    ("runner is macos-15-intel", job["runs-on"] == "macos-15-intel"),
     ("least-privilege permissions", data.get("permissions") == {"contents": "read"}),
     ("all referenced scripts exist", bool(refs) and all((ROOT / r).is_file() for r in refs)),
     ("Rust step precedes Xcode step", rust_i < xcode_i),
