@@ -63,7 +63,7 @@
     self.metalView.preferredFramesPerSecond = 60;
     self.metalView.clearColor = MTLClearColorMake(0.04, 0.05, 0.07, 1.0);
     [self.view addSubview:self.metalView];
-    ac_ios_set_metal_layer((CAMetalLayer *)self.metalView.layer);
+    ac_ios_set_metal_layer((__bridge void *)self.metalView.layer);
 
     [self buildMenu];
     [self scanContent];
@@ -185,7 +185,7 @@
     self.status.translatesAutoresizingMaskIntoConstraints = NO;
     self.status.numberOfLines = 0;
     self.status.textColor = UIColor.systemYellowColor;
-    self.status.font = [UIFont monospaceSystemFontOfSize:12.0];
+    self.status.font = [UIFont systemFontOfSize:12.0];
     [self.view addSubview:self.status];
 
     [NSLayoutConstraint activateConstraints:@[

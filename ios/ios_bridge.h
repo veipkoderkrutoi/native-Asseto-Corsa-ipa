@@ -28,6 +28,11 @@ void ac_ios_audio_suspend(void);
 void ac_ios_audio_resume(void);
 void *ac_ios_metal_layer(void);
 void ac_ios_set_metal_layer(void *layer);   /* pass NULL on view teardown */
+#ifdef __OBJC__
+@class NSString;
+void ac_ios_set_content_root(NSString *path);
+#endif
+void ac_ios_set_input(ACIosInputState state);
 
 /* Exported by ac-ios-runtime (Rust staticlib). */
 int  ac_ios_boot(void *out_vtable);
