@@ -1,0 +1,350 @@
+maths: MSVCR120.dll, the runtime Assetto Corsa itself uses
+conditions from C:\OpenCode-Sandbox\ac-ios-port\third_party\rustyAC-src\rustyAC-master\target\release\cfg\race.ini: air 26 C, road 34 C; track grip 100.0 % at the start, +1.00 % per lap (SESSION_START 100, RANDOMNESS 0, LAP_GAIN 1); no wind; penalties off (any number of tyres may leave the track)
+referee: Time Attack 30 min (race.ini's sessions; --no-referee: none)
+  (that session was lotus_elise_sc at magione, weather "4_mid_clear": the weather changes the looks only; car and track are still chosen with --car and --track)
+aids from C:\OpenCode-Sandbox\ac-ios-port\third_party\rustyAC-src\rustyAC-master\target\release\cfg\assists.ini: ABS on, traction control on, stability 100 %, mechanical damage 0 %, fuel x0, tyre wear x1, tyre blankets off
+shift aids: automatic clutch on, automatic gearbox on, automatic blip on (assists.ini; a pad or the keyboard forces the clutch on, as in the game)
+session: time attack ([SESSION_0] TYPE=5), from start; the clock runs from the spawn point, so lap 1 includes the run-up to the line (as in the game)
+  mechanical damage is OFF (assists.ini DAMAGE=0), as in your last Assetto Corsa session: a crash bends no suspension and no tyre can burst. --damage 100 turns it on
+bindings: the wheel's effects from C:\OpenCode-Sandbox\ac-ios-port\third_party\rustyAC-src\rustyAC-master\target\release\cfg\controls.ini
+bindings from C:\OpenCode-Sandbox\ac-ios-port\third_party\rustyAC-src\rustyAC-master\target\release\rustyac_controls.ini (yours to edit; delete it to read AC's bindings again)
+                           Xbox pad                     keyboard
+  steer                    left stick                   Left or A / Right or D
+  gas                      RT                           Up or W
+  brake                    LT                           Down or S
+  gear up                  A                            Space or E
+  gear down                X                            Left Ctrl or Q
+  clutch (to the floor)    -                            Left Shift
+  handbrake                B                            F9 or B
+  DRS                      -                            F
+  KERS / ERS boost (hold)  -                            K
+  headlights               D-pad up                     L
+  brake bias + / -         - / -                        ] / [
+  traction control + / -   - / -                        T, or Alt or Right Ctrl+- (with Shift: down)
+  ABS + / -                - / -                        Y, or Alt or Right Ctrl+- (with Shift: down)
+  automatic gearbox        -                            Alt or Right Ctrl+-
+  ideal line               -                            Alt or Right Ctrl+I
+  mouse steering (keyboard) -                            Alt or Right Ctrl+M
+  camera to the car ahead / behind / yours -                            Alt or Right Ctrl+Num3 / Num1 / Num2
+  replay: play / pause     -                            Alt or Right Ctrl+Space (or P)
+  replay: slow motion      -                            Alt or Right Ctrl+S
+  replay: faster           -                            Alt or Right Ctrl+F
+  replay: stop (to the start) -                            Home
+  MGU-K delivery + / -     - / -                        PageUp / PageDown, or Alt or Right Ctrl+2 (with Shift: down)
+  MGU-K recovery + / -     - / -                        Home / End, or Alt or Right Ctrl+1 (with Shift: down)
+  engine brake + / -       - / -                        Insert / Delete, or Alt or Right Ctrl+4 (with Shift: down)
+  MGU-H mode               -                            M, or Alt or Right Ctrl+3
+  next view                Back (View)                  F1 or C (F6: the car's own cameras)
+  reset to spawn           Back (View), a tap           R (N: a new car)
+  back on track            Back (View), held 0.6 s      Shift+R
+  pause                    Start (Menu)                 P
+  quit                     -                            Esc
+  pad steering: dead zone 0.05, gamma 3.01, speed 0.2, filter 0.600999, speed sensitivity 0.5, rumble 1
+  keyboard steering: speed 1.75, opposite 2.5, reset 1.8
+  (no clutch button on the pad: the automatic clutch does it all, as in AC)
+devices:
+  keyboard (always there)
+  Xbox pad on XInput slot 0 (in use)
+  DirectInput JOY=0 "Controller (XBOX 360 For Windows)" (game controller)
+  DirectInput JOY=1 "Controller (XBOX 360 For Windows)" (game controller)
+  DirectInput JOY=2 "Controller (XBOX 360 For Windows)" (an Xbox pad's DirectInput twin: read through XInput instead)
+  a DirectInput controller is attached but [STEER] JOY in the bindings does not point at it: it is not used
+  input method of the bindings: KEYBOARD; whichever device is touched last drives
+Update Clouds Generation to 4_mid_clear 
+post-processing on: the game's post-processing frame (2 samples, FXAA) with YEBIS's filter, tone mapping, eye adaptation, glare, light shafts, depth of field and heat shimmer from your acs.exe on Direct3D; the light levels are the game's once YEBIS starts
+yebis: no filmic table at 0x527cc0 (not acs.exe 1.16?); post-processing without YEBIS
+LOADING MODEL D:/Games/assettocorsa/content/tracks/magione/magione.kn5
+VERSION=6
+Loading 84 textures
+LOADING MODEL D:/Games/assettocorsa/content/tracks/magione/100.kn5
+VERSION=6
+Loading 1 textures
+track models: 2 files, 97 textures, 53 materials, loaded in 4.59 s
+USING DEFAULT DRIVER SYSTEM
+LOADING MODEL D:/Games/assettocorsa/content/driver/driver_no_HANS.kn5
+VERSION=6
+Loading 17 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/2016_Gloves_DIFF.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\_nm/2016_Gloves_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/MAT_white.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\white/2016_Suit_DIFF.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\_nm/2016_Suit_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/2016_Gloves_DIFF.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/2016_Gloves_DIFF.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\_nm/2016_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\_nm/2016_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/MAT_white.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txMaps  FILENAME:D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/MAT_white.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\white/2016_Suit_DIFF.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\white/2016_Suit_DIFF.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\_nm/2016_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\_nm/2016_Suit_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content\cars\lotus_elise_sc\animations\steer.ksanim
+VERSION: 2
+LOADING ANIMATION: D:\Games\assettocorsa\content\cars\lotus_elise_sc\animations\shift.ksanim
+VERSION: 1
+USING DEFAULT DRIVER SYSTEM
+LOADING MODEL D:/Games/assettocorsa/content/driver/driver_no_HANS_B.kn5
+VERSION=6
+Loading 0 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_HELMET\helmet_base_green\3/HELMET_2012.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/2016_Gloves_DIFF.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/2016_Gloves_DIFF.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\_nm/2016_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\_nm/2016_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/MAT_white.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txMaps  FILENAME:D:/Games/assettocorsa/content/texture/driver_GLOVES\sparco_racecars_tide_rg9\white/MAT_white.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\white/2016_Suit_DIFF.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\white/2016_Suit_DIFF.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\_nm/2016_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/driver_SUIT\sparco\_nm/2016_Suit_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content\cars\lotus_elise_sc\animations\steer.ksanim
+VERSION: 2
+LOADING ANIMATION: D:\Games\assettocorsa\content\cars\lotus_elise_sc\animations\shift.ksanim
+VERSION: 1
+USING PHYSICS DRIVEN SUSPENSIONS
+LOADING MODEL D:/Games/assettocorsa/content/cars/lotus_elise_sc/lotus_elise_sc.kn5
+VERSION=6
+Loading 67 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDetail  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds
+INIT LOD:0
+CREATING proview_nodes.ini
+LOADING MODEL D:/Games/assettocorsa/content/cars/lotus_elise_sc/LOD_001.kn5
+VERSION=6
+Loading 0 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDetail  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds
+INIT LOD:1
+LOADING MODEL D:/Games/assettocorsa/content/cars/lotus_elise_sc/LOD_002.kn5
+VERSION=6
+Loading 0 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDetail  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_D.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/Plate_NM.dds
+INIT LOD:2
+LOADING MODEL D:/Games/assettocorsa/content/cars/lotus_elise_sc/LOD_003.kn5
+VERSION=6
+Loading 0 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDetail  FILENAME:D:/Games/assettocorsa/content/cars/lotus_elise_sc/skins/0_racing_green/metal_detail.dds
+INIT LOD:3
+LOADING ANIMATION: D:\Games\assettocorsa\content\cars\lotus_elise_sc\animations\car_shift.ksanim
+VERSION: 1
+LOADING ANIMATION: D:\Games\assettocorsa\content\cars\lotus_elise_sc\animations\car_door_L.ksanim
+VERSION: 1
+ADDING BRAKE LIGHT: LIGHT_BRAKE
+ADDING BRAKE LIGHT: LIGHT_BRAKE
+ADDING BRAKE LIGHT: LIGHT_BRAKE
+ADDING BRAKE LIGHT: LIGHT_CENTRAL_REAR
+ADDING BRAKE LIGHT: LIGHT_CENTRAL_REAR
+ADDING BRAKE LIGHT: LIGHT_CENTRAL_REAR
+ADDING LIGHT OBJECT RPM_INDICATOR_mesh_SUB1
+ADDING LIGHT OBJECT SPEED_INDICATOR_mesh_SUB1
+ADDING LIGHT OBJECT F_lights_anabbaglianti
+ADDING LIGHT OBJECT F_lights_anabbaglianti
+ADDING LIGHT OBJECT F_lights_anabbaglianti
+ADDING LIGHT OBJECT F_lights_abbaglianti
+ADDING LIGHT OBJECT F_lights_abbaglianti
+ADDING LIGHT OBJECT F_lights_abbaglianti
+ADDING LIGHT OBJECT LIGHT_BRAKE_EXT
+ADDING LIGHT OBJECT LIGHT_BRAKE_EXT
+ADDING LIGHT OBJECT LIGHT_BRAKE_EXT
+ADDING LIGHT OBJECT LIGHTS_DASH
+DigitalInstruments::initInstruments()
+DigitalPanels::initPanel()
+BRAKE DISC: DISCBRAKE_LF_mesh FOUND FOR: DISC_LF
+BRAKE DISC: DISCBRAKE_LF_mesh FOUND FOR: DISC_LF
+BRAKE DISC: DISCBRAKE_LF_mesh FOUND FOR: DISC_LF
+FOUND 3 BRAKE DISCS MESHES FOR TYRE:0
+BRAKE DISC: DISCBRAKE_RF_mesh FOUND FOR: DISC_RF
+BRAKE DISC: DISCBRAKE_RF_mesh FOUND FOR: DISC_RF
+BRAKE DISC: DISCBRAKE_RF_mesh FOUND FOR: DISC_RF
+FOUND 3 BRAKE DISCS MESHES FOR TYRE:1
+BRAKE DISC: DISCBRAKE_LR_mesh FOUND FOR: DISC_LR
+BRAKE DISC: DISCBRAKE_LR_mesh FOUND FOR: DISC_LR
+BRAKE DISC: DISCBRAKE_LR_mesh FOUND FOR: DISC_LR
+FOUND 3 BRAKE DISCS MESHES FOR TYRE:2
+BRAKE DISC: DISCBRAKE_RR_mesh FOUND FOR: DISC_RR
+BRAKE DISC: DISCBRAKE_RR_mesh FOUND FOR: DISC_RR
+BRAKE DISC: DISCBRAKE_RR_mesh FOUND FOR: DISC_RR
+FOUND 3 BRAKE DISCS MESHES FOR TYRE:3
+car model D:\Games\assettocorsa\content\cars\lotus_elise_sc: 4 levels of detail, skin 0_racing_green, loaded in 3.97 s
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/pitcrew_Left.kn5
+VERSION=6
+Loading 14 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrew_Left.ksanim
+VERSION: 2
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrew_Left_idle_up.ksanim
+VERSION: 2
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrew_Left_idle_dw.ksanim
+VERSION: 2
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/pit_indicator.kn5
+VERSION=6
+Loading 1 textures
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/pitcrewtyre.kn5
+VERSION=6
+Loading 17 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrewtyre.ksanim
+VERSION: 2
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/pitcrewtyre.kn5
+VERSION=6
+Loading 17 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrewtyre.ksanim
+VERSION: 2
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/pitcrewtyre.kn5
+VERSION=6
+Loading 17 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrewtyre.ksanim
+VERSION: 2
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/pitcrewtyre.kn5
+VERSION=6
+Loading 17 textures
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_HELMET\green/Crew_HELMET_Color.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Gloves.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Gloves_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\green_black/DRIVER_Suit2.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_SUIT\type1\_nm/DRIVER_Suit_NM.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txDiffuse  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew.dds
+SKINNED TEXTURE D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds FOUND, OVERRIDING
+Assign texture override for textureless kn5. RES: txNormal  FILENAME:D:/Games/assettocorsa/content/texture/crew_BRAND\lotus/Brands_Crew_NM.dds
+LOADING ANIMATION: D:\Games\assettocorsa\content/objects3D\pitcrewtyre.ksanim
+VERSION: 2
+pit crew: 1 lollipop man, the marker loaded, the tyre changers loaded
+Update Clouds Generation to 4_mid_clear 
+Loading custom weather: 4_mid_clear
+LOADING MODEL D:/Games/assettocorsa/content/objects3D/cubemap_model.kn5
+VERSION=5
+Loading 6 textures
+KGL CREATE FONT Segoe UI with locale 
+KGL CREATE FONT Consolas with locale 
+KGL CREATE FONT Segoe UI with locale 
+KGL CREATE FONT Segoe UI with locale 
+KGL CREATE FONT Orbitron with locale 
+KGL CREATE FONT Consolas with locale 
+KGL CREATE FONT Consolas with locale 
+KGL CREATE FONT Orbitron with locale 

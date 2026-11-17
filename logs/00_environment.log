@@ -1,0 +1,35 @@
+# Environment probe — 2026-11-17
+
+OS: Microsoft Windows NT 10.0.19045.0 / AMD64
+
+Toolchain probes (Get-Command):
+  xcodebuild : ABSENT
+  xcrun      : ABSENT
+  clang      : ABSENT (system)
+  swiftc     : ABSENT
+  codesign   : ABSENT
+  git        : ABSENT (system; rustup install worked without it)
+  cmake      : ABSENT
+  cargo      : ABSENT initially — installed rustup stable 1.100.0 during this task
+  rustc      : ABSENT initially — same
+
+Python:         3.12 (C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe)
+Zig:            0.17.1 via `pip install ziglang==0.17.1` (python -m ziglang)
+Rust:           rustc 1.100.0 (0ef1bc386 2026-11-09), stable-x86_64-pc-windows-msvc
+
+iPhoneOS SDK:   ABSENT (no Xcode, no /Applications/Xcode.app)
+Simulator:      ABSENT
+Device:         ABSENT
+Signing identity / provisioning profile: ABSENT
+Apple CI tokens / SSH keys / MCP resources: none (list_mcp_resources returned empty)
+
+Local game install: D:\Games\assettocorsa
+  version (changelog.txt line 1): 1.16.2
+  Steam AppId (CONFIG.ini): 244210
+  files: 33,994  bytes: 42,685,423,471
+  cars: 178   tracks: 21
+
+Network research: GitHub REST API + raw.githubusercontent.com reachable;
+  websearch tool returned HTTP 402, so API was used directly.
+
+Conclusion: producing/linking/signing a real iOS IPA is impossible on this host.

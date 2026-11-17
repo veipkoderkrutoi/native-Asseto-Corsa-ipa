@@ -1,0 +1,36 @@
+--- a/core/ac_pal_bridge.h
++++ b/core/ac_pal_bridge.h
+@@ -1 +1,8 @@
+-void ac_pal_bridge_set_input(float steer, float throttle, float brake);+void ac_pal_bridge_set_input(float steer, float throttle, float brake);
++
++/* Sets the full control state for the next physics steps. gear_up/gear_down/
++ * camera_next are ONE-SHOT requests: the bridge consumes them on the next
++ * simulation step so a held button cannot repeat shifts every 3 ms. */
++void ac_pal_bridge_set_controls(float steer, float throttle, float brake,
++                                float handbrake, int gear_up, int gear_down,
++                                int camera_next);--- a/core/ac_pal_bridge.c
++++ b/core/ac_pal_bridge.c
+@@ -1,2 +1,9 @@
+     g_vt.session_set_input(g_session, g_steer, g_throttle, g_brake);
++        if (g_vt.session_set_ext_input) {
++            g_vt.session_set_ext_input(g_session, g_handbrake,
++                                       g_gear_up_pending, g_gear_dn_pending,
++                                       g_camera_pending);
++        }
++        /* Consume one-shot requests exactly once, regardless of step count. */
++        g_gear_up_pending = g_gear_dn_pending = g_camera_pending = 0;
+         g_vt.session_step(g_session, dt);--- a/rust/ac-ios-runtime/src/lib.rs
++++ b/rust/ac-ios-runtime/src/lib.rs
+@@ -1 +1,4 @@
++    pub session_set_ext_input: Option<
++        unsafe extern "C" fn(*mut c_void, f32, c_int, c_int, c_int),
++    >,
+     pub session_step: Option<unsafe extern "C" fn(*mut c_void, c_double)>,--- a/rust/ac-ios-runtime/src/lib.rs
++++ b/rust/ac-ios-runtime/src/lib.rs
+@@ -1 +1 @@
+-    setup.auto_shifter = true;+    setup.auto_shifter = AUTO_SHIFTER.load(Ordering::Relaxed);--- a/ios/ios_bridge.h
++++ b/ios/ios_bridge.h
+@@ -1 +1,3 @@
+-int  ac_ios_install_core_vtable(void);+int  ac_ios_install_core_vtable(void);
++/* Set BEFORE creating a session: 1 = automatic gearbox, 0 = manual paddles. */
++void ac_ios_set_auto_shifter(int enabled);

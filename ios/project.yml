@@ -1,0 +1,65 @@
+# XcodeGen project definition for the native iOS prototype.
+# Generate with:  xcodegen generate --spec ios/project.yml --project ios
+# Verified structurally by scripts/verify_ios_project.py on the research host;
+# actual `xcodegen`/`xcodebuild` require macOS + Xcode (not available here).
+name: ac-ios-port
+options:
+  bundleIdPrefix: com.aciosprototype
+  createIntermediateGroups: true
+  projectFormat: xcode16_0
+settings:
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+  CLANG_ENABLE_MODULES: YES
+  CLANG_ENABLE_OBJC_ARC: YES
+  ENABLE_BITCODE: NO
+  ALWAYS_SEARCH_USER_PATHS: NO
+targets:
+  ac-ios-port:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: main.m
+      - path: AppDelegate.m
+      - path: GameViewController.m
+      - path: ios_bridge.m
+      - path: ../core/ac_pal_bridge.c
+      - path: ../core/ac_pal_bridge.h
+    dependencies:
+      # XcodeGen does not assign a build phase to `.a` files listed in
+      # `sources`; this dependency puts the real ARM64 Rust library into
+      # "Link Binary With Libraries".
+      - framework: ../rust/target/aarch64-apple-ios/release/libac_ios_runtime.a
+        embed: false
+      # SDK frameworks used explicitly by the Objective-C sources.
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: GameController.framework
+      - sdk: QuartzCore.framework
+      - sdk: UniformTypeIdentifiers.framework
+    headers:
+      - path: AppDelegate.h
+      - path: GameViewController.h
+      - path: ios_bridge.h
+      - path: ../core/ac_pal_bridge.h
+        public: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.aciosprototype.ac-ios-port
+      PRODUCT_NAME: ac-ios-port
+      INFOPLIST_FILE: Info.plist
+      CODE_SIGN_ENTITLEMENTS: ac-ios.entitlements
+      CODE_SIGN_STYLE: Manual
+      DEVELOPMENT_TEAM: $(AC_TEAM_ID)
+      CODE_SIGN_IDENTITY: $(AC_SIGNING_IDENTITY)
+      PROVISIONING_PROFILE_SPECIFIER: $(AC_PROFILE_NAME)
+      TARGETED_DEVICE_FAMILY: "1,2"
+      HEADER_SEARCH_PATHS:
+        - $(SRCROOT)/../core
+        - $(SRCROOT)
+      LIBRARY_SEARCH_PATHS:
+        - $(SRCROOT)/../rust/target/aarch64-apple-ios/release
+      OTHER_LDFLAGS:
+        - "-ObjC"
+        - "-lc++"
+    resources:
+      - path: Assets.xcassets

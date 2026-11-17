@@ -1,0 +1,37 @@
+# Native core build — 2026-11-17T17:03:24.916137+00:00
+
+python: 3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]
+zig version: 0.17.1
+
+$ C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe -m ziglang cc -std=c11 -O2 -Wall -Wextra core/ac_pal_bridge.c core/ac_pal_bridge_test.c -o build\ac_pal_bridge_test.exe
+
+[exit 0]
+$ D:\opencode-sandbox\ac-ios-port\build\ac_pal_bridge_test.exe
+ac_pal_bridge_test: ALL TESTS PASSED
+[exit 0]
+$ C:\Users\User\AppData\Local\Programs\Python\Python312\python.exe -m ziglang cc -target aarch64-ios -O2 -std=c11 -Wall -Wextra -c core/ac_pal_bridge.c -o artifacts\ac_pal_bridge.arm64.o
+
+[exit 0]
+fixed 16-byte LC_BUILD_VERSION at offset 1248 -> LC_VERSION_MIN_IPHONEOS 16.0
+RESULT: min iOS = 16.0.0 (load command 0x25, size 16)
+path: D:\opencode-sandbox\ac-ios-port\artifacts\ac_pal_bridge.arm64.o
+size: 19600
+magic: 0xfeedfacf
+cputype: 0x100000c
+cpusubtype: 0
+filetype: 1
+ncmds: 5
+sizeofcmds: 1336
+flags: 0x2000
+load_commands: [{'cmd': 'LC_SEGMENT_64', 'cmdsize': 1192}, {'cmd': 'LC_FUNCTION_STARTS', 'cmdsize': 24}, {'cmd': '0x25', 'cmdsize': 16}, {'cmd': 'LC_SYMTAB', 'cmdsize': 24}, {'cmd': 'LC_DYSYMTAB', 'cmdsize': 80}]
+ok: True
+--- checks ---
+[PASS] magic_64
+[PASS] little_endian
+[PASS] cputype_arm64
+[PASS] cpusubtype_all
+[PASS] filetype_object
+[PASS] header_fits
+[PASS] load_commands_fit
+[PASS] load_command_sizes
+RESULT: ARM64 Mach-O object verified

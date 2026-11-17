@@ -1,0 +1,37 @@
+--- a/core/ac_pal_bridge.c
++++ b/core/ac_pal_bridge.c
+@@ -1,3 +1,3 @@
+-    /* AC's simulation runs on a fixed 1 ms clock; 34 steps covers a 60 Hz
++    /* rustyac_game::sim::DT is 0.003 s (333.33 Hz). 12 steps cover a 60 Hz
+      * frame (16.7 ms) plus realistic jitter without a spiral of death. */
+-    ac_fixed_step_init(&g_clock, 1000.0, 34);+    ac_fixed_step_init(&g_clock, 1000.0 / 3.0, 12);--- a/core/ac_pal_bridge_test.c
++++ b/core/ac_pal_bridge_test.c
+@@ -1 +1 @@
+-    CHECK(approx((float)g_mock.last_dt, 0.001f));+    CHECK(approx((float)g_mock.last_dt, 0.003f));--- a/rust/ac-ios-runtime/Cargo.toml
++++ b/rust/ac-ios-runtime/Cargo.toml
+@@ -1,2 +1,6 @@
+ [dependencies]
+-ac-ios-pal = { path = "../ac-ios-pal" }
++# Real Assetto Corsa engine (GPL-3.0-or-later). These are the actual upstream
++# crates, not reimplementations. Paths are relative to this crate.
++rustyac-game = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-game" }
++rustyac-physics = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-physics" }
++rustyac-content = { path = "../../third_party/rustyAC-src/rustyAC-master/crates/rustyac-content" }
+--- a/rust/ac-ios-pal/src/lib.rs
++++ b/rust/ac-ios-pal/src/lib.rs
+@@ -1,2 +1,2 @@
+-        /// Returns the wgpu-compatible Metal device pointer (CAMetalLayer).
+-        pub fn ac_ios_metal_device() -> *mut c_void;+        /// Returns the CAMetalLayer backing the MTKView (name matches ios_bridge.m).
++        pub fn ac_ios_metal_layer() -> *mut c_void;--- a/rust/ac-ios-runtime/src/lib.rs
++++ b/rust/ac-ios-runtime/src/lib.rs
+@@ -1,3 +1,10 @@
+ use std::ffi::CStr;
+ use std::os::raw::{c_char, c_double, c_int, c_void};
+-use std::sync::Mutex;+use std::path::PathBuf;
++use std::sync::{Arc, Mutex};
++
++use rustyac_game::input_file::SimSetup;
++use rustyac_game::sim::{find_car_data, find_track, GameSim, SpawnSequence};
++use rustyac_game::view::CarView;
++use rustyac_physics::car::{CarControls, CarControlsInput};
++use rustyac_game::sim::DriverSource;

@@ -1,0 +1,9 @@
+{
+  "artifact": "artifacts/ac_pal_bridge.arm64.o",
+  "size": 19600,
+  "sha256": "46eaef497801cd6e14f0e35ebfa416332f4bc0f7e6419f9ff17ab0ddfaab1125",
+  "target": "aarch64-apple-ios (Mach-O 64, cputype 0x0100000c)",
+  "toolchain": "zig 0.17.1 (pip ziglang) cross-compiler",
+  "build_command": "python -m ziglang cc -target aarch64-ios -O2 -std=c11 -Wall -Wextra -c core/ac_pal_bridge.c -o artifacts/ac_pal_bridge.arm64.o",
+  "note": "Object file only. Linking into an IPA requires Xcode/iPhoneOS SDK on macOS."
+}

@@ -1,0 +1,30 @@
+{
+  "artifact": "rust/target/aarch64-apple-ios/release/libac_ios_runtime.a",
+  "sha256": "7f3e71900ea3cc6e8043f96db6ad1c7022adac71d89a0f1f692d82e66173b565",
+  "size_bytes": 51412568,
+  "target": "aarch64-apple-ios",
+  "build_command": "cargo build --release --target aarch64-apple-ios -p ac-ios-runtime",
+  "build_log": "phase3_1/build_staticlib.log",
+  "cargo_jobs": 2,
+  "verification": {
+    "script": "scripts/inspect_ios_archive.py",
+    "members": 694,
+    "mach_o_64_objects": 693,
+    "arm64_objects": 693,
+    "render_module_present": true,
+    "wgpu_metal_deps_present": true,
+    "exported_symbols": [
+      "ac_ios_render_init",
+      "ac_ios_render_frame",
+      "ac_ios_render_last_draw_ms",
+      "ac_ios_set_auto_shifter",
+      "ac_ios_core_session_set_ext_input",
+      "ac_ios_metal_init",
+      "ac_ios_boot",
+      "ac_ios_core_session_create"
+    ],
+    "result": "PHASE 3 RENDER MODULE VERIFIED IN iOS ARCHIVE"
+  },
+  "note": "This is a static library of real ARM64 object code, not an app. Linking into an IPA, codesigning and execution require Xcode/iPhoneOS SDK and a device, none of which exist in this environment."
+}
+

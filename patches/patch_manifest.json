@@ -1,0 +1,24 @@
+{
+  "upstream": "D:\\opencode-sandbox\\ac-ios-port\\third_party\\rustyAC-src\\rustyAC-master",
+  "patch": "0001-ios-native-target.patch",
+  "files": [
+    {
+      "path": "rust-toolchain.toml",
+      "original_sha256": "2cde893af41dc2508ef984e9e8ceba4b3a1a063a8ca6665a9b3901b4543fee7e",
+      "patched_sha256": "c3cc1d8d3648c5d936251230667946a179aa4f6dbadb7348bf25ecfbb244414c",
+      "verified": true
+    },
+    {
+      "path": "crates/rustyac-render/Cargo.toml",
+      "original_sha256": "dfbda2822fa7e6137b9516da141ef21789d2e480cf8ad1fb81b10eaa0c757b8b",
+      "patched_sha256": "3e0d4e40f5d5a686a26ee94e214294b6aaf0aea94073220432d7c0e6e4c37ad6",
+      "verified": true
+    },
+    {
+      "path": "crates/rustyac-game/Cargo.toml",
+      "original_sha256": "758ea5078b7bba5434374675f34a356eb28cabe0f604f7a36e040cbd11583e49",
+      "patched_sha256": "c803ef025b33e0390108110c1d718b519637309b1910168213a2adac28e8c64d",
+      "verified": true
+    }
+  ]
+}

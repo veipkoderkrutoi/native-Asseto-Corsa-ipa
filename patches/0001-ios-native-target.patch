@@ -1,0 +1,54 @@
+--- a/rust-toolchain.toml
++++ b/rust-toolchain.toml
+@@ -4,4 +4,4 @@
+ channel = "1.97.0"
+ profile = "minimal"
+ components = ["clippy", "rustfmt"]
+-targets = ["wasm32-unknown-unknown", "wasm32-wasip1"]
++targets = ["wasm32-unknown-unknown", "wasm32-wasip1", "aarch64-apple-ios"]
+--- a/crates/rustyac-render/Cargo.toml
++++ b/crates/rustyac-render/Cargo.toml
+@@ -18,7 +18,7 @@
+ rustyac-gui = { path = "../rustyac-gui" }
+ # native wgpu: for now only the per-shader proof of the WGSL translation uses it
+ # (Vulkan for SwiftShader, the second software rasterizer of the proof)
+-wgpu = { version = "=30.0.1", default-features = false, features = ["dx12", "vulkan", "wgsl"], optional = true }
++# native wgpu: backend features are selected per target at the end of this file
+ # the game's compiled shaders read: YEBIS's variable lists and input layouts, and the WGSL
+ # translation of kgl on wgpu (backend-wgpu)
+ rustyac-dxbc = { path = "../rustyac-dxbc" }
+@@ -59,3 +59,17 @@
+ [[example]]
+ name = "shader_proof"
+ required-features = ["wgpu"]
++
++# Target-specific wgpu backends: iOS has no DX12/Vulkan, it uses Metal.
++# The UIKit host creates the device from a CAMetalLayer and calls Kgl::give_device().
++[target.'cfg(not(target_os = "ios"))'.dependencies.wgpu]
++version = "=30.0.1"
++default-features = false
++features = ["dx12", "vulkan", "wgsl"]
++optional = true
++
++[target.'cfg(target_os = "ios")'.dependencies.wgpu]
++version = "=30.0.1"
++default-features = false
++features = ["metal", "wgsl"]
++optional = true
+--- a/crates/rustyac-game/Cargo.toml
++++ b/crates/rustyac-game/Cargo.toml
+@@ -85,6 +85,14 @@
+ # the clock (std::time::SystemTime panics in a browser)
+ js-sys = "0.3"
+ 
++# iOS: the portable simulation, AC's input classes and AC's renderer on kgl's
++# wgpu/Metal backend. Windows-only parts (window, XInput/DirectInput, shared
++# memory, Steam, launcher) stay out; UIKit supplies the window, touch/gamepad
++# input and the application lifecycle. The app crate enables the `wgpu`
++# feature so `rustyac_game::render::ac` is compiled.
++[target.'cfg(target_os = "ios")'.dependencies]
++rustyac-render = { path = "../rustyac-render", features = ["backend-wgpu"] }
++
+ [features]
+ # AC's renderer (`render::ac`) on kgl's wgpu backend on Windows too, as in the page: only for
+ # the native proofs of Full mode (rustyac-web's full_frame example). It leaves out the window,
