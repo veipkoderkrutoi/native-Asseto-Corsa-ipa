@@ -10,7 +10,6 @@ IGNORE_DIRS = {"rust/target", "third_party/rustyAC-src/rustyAC-master/target",
                "third_party/rustyAC-src/rustyAC-master/things",
                "third_party/rustyAC-src/rustyAC-master/tools",
                "third_party/rustyAC-src/rustyAC-master/web",
-               "third_party/rustyAC-src/rustyAC-master/packaging",
                "third_party/rustyAC-src/rustyAC-master/server",
                "third_party/rustyAC-src/rustyAC-master/.github",
                "build", "checkpoint", "__pycache__", ".git"}

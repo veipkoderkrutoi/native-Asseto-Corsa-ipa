@@ -1,5 +1,5 @@
-      4089  .github/workflows/build-unsigned-ios.yml
-       954  .gitignore
+      4204  .github/workflows/build-unsigned-ios.yml
+       904  .gitignore
       7982  PHASE2_3_4_REPORT.md
       3635  README.md
       1177  artifacts/IOS_STATICLIB_MANIFEST.json
@@ -123,12 +123,19 @@
         28  phase5/project_preflight.exit
       4730  phase5/project_preflight.log
        538  phase5/workflow_check.log
-      3328  phase6/PREP_REPORT.md
-    113251  phase6/TRACKED_FILES.txt
-     29850  phase6/prepush_audit.json
+      3501  phase6/PREP_REPORT.md
+     59892  phase6/TRACKED_FILES.txt
+     17612  phase6/gha/gha_result.json
+     94236  phase6/gha/job3.log
+       610  phase6/gha_result_run2.log
+      8420  phase6/gha_result_run3.log
+       378  phase6/gha_wait.log
+      1590  phase6/gha_wait2.log
+      1356  phase6/gha_wait3.log
+      3389  phase6/prepush_audit.json
      38556  phase6/prepush_audit.log
       1230  phase6/workflow_check.log
-       154  rust/.cargo/config.toml
+       248  rust/.cargo/config.toml
      41505  rust/Cargo.lock
        172  rust/Cargo.toml
        251  rust/ac-ios-pal/Cargo.toml
@@ -147,25 +154,25 @@
       3741  scripts/build_native_core.py
       1288  scripts/check_macho_minos.py
        444  scripts/dump_load_commands.py
-      5049  scripts/fetch_gha_result.py
+      5073  scripts/fetch_gha_result.py
       2777  scripts/fix_macho_minos.py
        440  scripts/inspect_archive.py
       2400  scripts/inspect_ios_archive.py
-      1930  scripts/list_tracked_files.py
+      1863  scripts/list_tracked_files.py
       7180  scripts/make_patches.py
       3663  scripts/make_phase2_patches.py
       2664  scripts/make_phase3_patches.py
       3239  scripts/make_phase4_patches.py
       1913  scripts/make_phase5_patches.py
       2148  scripts/make_sha256_manifest.py
-      6257  scripts/prepush_audit.py
+      6201  scripts/prepush_audit.py
        601  scripts/restore_upstream_manifest.py
       3650  scripts/verify_delivery.py
       5436  scripts/verify_ios_project.py
       1535  scripts/verify_ios_staticlib.py
       2832  scripts/verify_macho.py
        792  scripts/verify_staticlib_hash.py
-      2104  scripts/verify_workflow_refs.py
+      2116  scripts/verify_workflow_refs.py
        782  third_party/rustyAC-src/rustyAC-master/.dockerignore
         19  third_party/rustyAC-src/rustyAC-master/.gitattributes
        737  third_party/rustyAC-src/rustyAC-master/.gitignore
@@ -739,4 +746,7 @@
       6063  third_party/rustyAC-src/rustyAC-master/crates/rustyac-web/src/sound.rs
      63966  third_party/rustyAC-src/rustyAC-master/crates/rustyac-web/src/web.rs
       7943  third_party/rustyAC-src/rustyAC-master/crates/rustyac-web/tests/drive.rs
+      9851  third_party/rustyAC-src/rustyAC-master/packaging/HOW_TO_RUN.txt
+      4445  third_party/rustyAC-src/rustyAC-master/packaging/package.ps1
+      3822  third_party/rustyAC-src/rustyAC-master/packaging/version_res.rs
        340  third_party/rustyAC-src/rustyAC-master/rust-toolchain.toml

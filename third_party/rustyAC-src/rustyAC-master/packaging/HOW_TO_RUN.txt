@@ -1,0 +1,192 @@
+rustyAC @VERSION@ - how to run
+=====================================
+
+rustyAC is a Rust rewrite of Assetto Corsa 1.16, checked bit for bit against
+the original game: the physics, the AI, the renderer with the game's own shaders
+and post-processing, the sound, the HUD and menus, the launcher and online play.
+--debug-view swaps the picture for a simple debug view.
+
+Source, notes and newer versions: https://github.com/thesupersupersigma/rustyAC
+
+
+1. What you need
+----------------
+
+- Windows 10 or 11, 64-bit, with a graphics card that does Direct3D 11.
+
+- Your own Assetto Corsa install. No Assetto Corsa file comes with rustyAC:
+  the tracks, the car models and the car data are read from your own game.
+  rustyAC finds the game by itself in Steam's usual place
+  (C:\Program Files (x86)\Steam\steamapps\common\assettocorsa) and in every
+  other Steam library (it reads Steam's libraryfolders.vdf). If your game is
+  somewhere else, say where it is:
+
+      set AC_ROOT=D:\Games\assettocorsa               (in cmd)
+      $env:AC_ROOT = "D:\Games\assettocorsa"          (in PowerShell)
+
+  Nothing has to be unpacked or copied. A car is named by its folder name under
+  content\cars (--car ks_ferrari_f2004, which is also the default). Its data is
+  read straight out of content\cars\<car>\data.acd, in memory, the way the game
+  does it; a car that has a plain "data" folder instead (the SDK's cars,
+  unpacked mods) is read from that. Nothing is written into the game's folder.
+
+  --car also takes a folder: a car's folder, or a folder with the plain data
+  files (car.ini, tyres.ini, ...) in it:
+
+      rustyac.exe --car "D:\my cars\my_car\data"
+
+  Every car the plain game can load drives. A car made for Custom Shaders
+  Patch only (suspension TYPE=COSMIC, or data files encrypted for it) is
+  refused with a message that says so.
+
+- Sound is Assetto Corsa's own: rustyAC loads the game's two FMOD DLLs
+  (fmod64.dll, fmodstudio64.dll) and its sound banks from your install when it
+  starts and plays them the way the game does. None of them comes with rustyAC.
+  If the game is not found, rustyAC says so and runs silently.
+
+- Optional: the Visual C++ 2013 runtime (MSVCR120.dll). Assetto Corsa installs
+  it, so you most likely have it. With it rustyAC calls the game's own maths
+  functions. Without it rustyAC uses its own copy of those functions (sin, cos,
+  pow and the like), rewritten in Rust, which gives the same results bit for
+  bit on any processor since about 2013; the numbers in the cars' files are
+  then read by Rust's own parser, and the sound's level maths is Rust's.
+  rustyAC prints which of the two it uses when it starts ("maths: ...").
+
+
+2. Commands
+-----------
+
+Open a console (cmd or PowerShell) in this folder.
+
+    rustyac.exe --track spa --windowed       drive at Spa, in a window
+    rustyac.exe --track spa                  the same, borderless full screen
+    rustyac.exe --windowed                   the endless flat road
+    rustyac.exe --track spa --windowed --autodrive
+                                             watch a simple driver follow the AI line
+    rustyac.exe --car ks_ferrari_488_gt3 --track magione --windowed
+                                             another car (content\cars\ks_ferrari_488_gt3)
+                                             and track
+    rustyac.exe --track laguna --windowed    a track by a part of its name (Laguna Seca)
+    rustyac.exe --track ks_nurburgring --layout layout_sprint_a --windowed
+                                             a track with layouts: say which one
+    rustyac.exe --list-tracks                every track and layout of your game, and
+                                             which ones cannot be driven (and why)
+    rustyac.exe --list-devices               the pads and wheels found, and the bindings
+    rustyac.exe --help                       every option
+
+Or start Assetto Corsa's own launcher, with your game's own theme:
+
+    rustyac-launcher.exe                     pick car, track and session, then Start:
+                                             rustyac.exe drives, the results come back
+
+It needs Microsoft Edge WebView2 (part of Windows 10 and 11). Its settings and
+its race.ini are in this folder's cfg\, never in Documents\Assetto Corsa.
+
+The weather is your Assetto Corsa's: air and road temperature, track grip,
+wind and the driving aids are read from the session you last set up in the
+game (Documents\Assetto Corsa\cfg\race.ini and assists.ini). To change them:
+
+    rustyac.exe --track spa --windowed --air 26 --road 30 --grip 100 --wind 0
+    rustyac.exe --track spa --windowed --no-race-ini      26 C / 30 C, full grip, no wind
+    rustyac.exe --track spa --windowed --setup mysetup    a setup saved in the game
+    rustyac.exe --track spa --windowed --camera car0      start on the car's first camera
+
+The sound's volumes and the output device are your Assetto Corsa's too
+(Documents\Assetto Corsa\cfgudio.ini). To change them here:
+
+    rustyac.exe --track spa --windowed --volume 0.4       master volume, 0 to 1
+    rustyac.exe --track spa --windowed --no-audio         no sound
+    rustyac.exe --track spa --autodrive --headless --duration 40 --audio-wav lap.wav
+                                             no window, no speakers: the sound of
+                                             a drive into a WAV file
+
+The first run writes rustyac_controls.ini next to rustyac.exe with the bindings
+it found (your Assetto Corsa bindings if there are any). That file is yours to
+edit; delete it to import the game's bindings again.
+
+The window must have the keyboard focus to drive. Clicking another window
+pauses the drive.
+
+
+3. Keys
+-------
+
+Keyboard (yours may differ: the first key is taken from your Assetto Corsa
+bindings, the second is added by rustyAC):
+
+    Left / Right, or A / D     steer
+    Up, or W                   throttle
+    Down, or S                 brake
+    Space, or E                gear up
+    Left Ctrl, or Q            gear down
+    Left Shift                 clutch
+    F                          DRS
+    F9, or B                   handbrake
+    L                          headlights
+    Alt + G                    automatic gearbox on / off
+    T, or Alt + T              traction control level up (with Shift: down)
+    Y, or Alt + A              ABS level up (with Shift: down)
+                               (for the Alt commands a Ctrl key that is not a
+                               driving key works too; [RUSTYAC] COMMAND_MODIFIER
+                               in rustyac_controls.ini chooses: AUTO, ALT, LCTRL
+                               or RCTRL)
+    ]                          brake bias one click forward
+    [                          brake bias one click rearward
+                               (T, Y, ] and [ are rustyAC's own keys, the same as
+                               in the browser preview. If your bindings use one
+                               of them for something else, it keeps that use.
+                               ] and [ are the two keys right of P on a US
+                               keyboard.)
+    F1, or C                   next view: chase, chase 2, bonnet, bumper, dash, cockpit
+    F11                        the virtual mirror on or off (needs mirrors in AC's
+                               video settings; cockpit and chase views)
+    F6                         the car's own cameras (the F2004's first one is above
+                               the driver's helmet, looking down the nose); F1 goes back
+    R                          reset the car to the spawn point
+    Shift + R                  back onto the track where the car is
+    N                          a brand-new car
+    P or Pause                 pause
+    Esc                        Assetto Corsa's pause menu (Exit is in it)
+
+Xbox pad:
+
+    Left stick                 steer
+    RT / LT                    throttle / brake
+    Y / X                      gear up / gear down
+    A                          clutch
+    LB                         DRS
+    D-pad up / down            traction control level up / down
+    D-pad right / left         brake bias forward / back
+    Back held + D-pad up/down  ABS level up / down
+    Right stick press          next view (as F1)
+    Back (View), a tap         reset the car to the spawn point
+    Back held 0.6 s, let go    back onto the track where the car is
+    Start (Menu)               pause
+
+    What Back does is decided when you let it go: nothing if you pressed the
+    D-pad's up or down while holding it (it was the ABS combination), else the
+    reset after a tap, or "back onto the track" after 0.6 s or more.
+
+With --debug-hud rustyAC's own panels show the levels: "TC 2/3", "ABS off" (or
+"not fitted" for a car without it) and "Bias 58.0 %", and a note in the upper
+middle for a moment when one of them changes (AC's own HUD shows what the game
+shows). A level goes up to its highest and then to
+off, as in the game. The numbers are the game's own: the level and count its
+own message shows, and the brake bias of its shared memory (brakeBias).
+
+A wheel is read through your Assetto Corsa bindings; add --ffb for force
+feedback (low strength).
+
+
+4. Licenses
+-----------
+
+rustyac.exe is free software under the GNU General Public License, version 3 or
+later (LICENSE-GPL); parts of it are under MIT / Apache-2.0 and BSD-3-Clause.
+LICENSING.md says which part is under which license, and THIRD_PARTY_NOTICES.txt
+holds the license texts and copyright notices of the Rust libraries it is built
+with. The source of this exact build is the tag @TAG@ of the repository above.
+
+Assetto Corsa is a trademark of its owners. rustyAC is not affiliated with them
+and is not endorsed by them. FMOD is a trademark of Firelight Technologies Pty
+Ltd; rustyAC ships no FMOD file and only calls the copy in your game's folder.
