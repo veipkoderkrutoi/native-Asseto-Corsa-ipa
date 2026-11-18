@@ -104,24 +104,31 @@ unsafe fn render_init_inner(
         let info = real.sim.car_info();
         let root = rustyac_game::sim::ac_root()
             .ok_or_else(|| "AC_ROOT is not set".to_string())?;
+        // Use the real AC race.ini look exactly like the desktop renderer and
+        // the Windows full_frame reference do. Hardcoding sun_angle = 0 and an
+        // empty weather name skipped SkyBox::update_clouds_generation and
+        // Graphics::apply_custom_weather, producing a flat sky/dark surfaces.
+        let race_path = root.join("cfg/race.ini");
+        let race_reader = rustyac_physics::data::ini::IniReader::load_race(&race_path).ok();
+        let look = rustyac_game::render::ac::RaceLook::of(race_reader.as_ref());
         let options = AcOptions {
             warp: false,
             gpu_log: None,
             game: root,
-            sun_angle: 0.0,
-            weather: String::new(),
+            sun_angle: look.sun_angle,
+            weather: look.weather.clone(),
             skin: info.skin.clone(),
             video_exact: false,
             cube_faces: None,
             mirror_size: None,
-            sun_animation: None,
-            groove: None,
+            sun_animation: look.sun_animation,
+            groove: look.groove,
             mirror_hq: None,
             world_detail: None,
             render_seed: info.render_seed,
             cube_size: None,
             ideal_line: false,
-            session_type: 4, // hotlap
+            session_type: look.session_type.unwrap_or(4), // race.ini, else hotlap
             start_lights: None,
             video_ini: None,
             preset: None,
@@ -263,11 +270,16 @@ pub extern "C" fn ac_ios_render_resize(width: u32, height: u32) -> c_int {
     })
 }
 
-/// Cycles AC's own drivable cameras on the real renderer's camera object.
+/// Cycles AC's own cameras exactly like the game's F1 key.
+///
+/// `next_drivable()` only walks chase/chase2/bonnet/bumper/dash and therefore
+/// never reaches `CameraMode::Cockpit` — which is the view that shows the
+/// original interior mesh (including the real steering wheel) for the car.
+/// `f1()` is upstream's own full cycle and returns to the cockpit after dash.
 pub(crate) fn camera_next() {
     STATE.with(|slot| {
         if let Some(state) = slot.borrow_mut().as_mut() {
-            state.camera.next_drivable();
+            state.camera.f1();
         }
     });
 }

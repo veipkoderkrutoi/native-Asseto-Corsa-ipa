@@ -98,6 +98,16 @@ static void test_touch(void) {
     float s, t, b;
     ac_map_touch(1.0f, 1.0f, 0.0f, &s, &t, &b);
     CHECK(approx(s, 1.0f) && approx(t, 1.0f) && approx(b, 0.0f));
+
+    /* Sign convention (rustyac-physics/car/feed.rs:43): steer positive = right.
+     * The iOS wheel drag maps left -> negative, right -> positive. No layer in
+     * this bridge is allowed to flip it again. */
+    ac_map_touch(-1.0f, 0.0f, 0.0f, &s, &t, &b);
+    CHECK(s < 0.0f);              /* left drag must stay left */
+    ac_map_touch(1.0f, 0.0f, 0.0f, &s, &t, &b);
+    CHECK(s > 0.0f);              /* right drag must stay right */
+    ac_map_touch(0.0f, 0.0f, 0.0f, &s, &t, &b);
+    CHECK(approx(s, 0.0f) && approx(t, 0.0f) && approx(b, 0.0f));
 }
 
 static void count_step(void *ctx, double dt);

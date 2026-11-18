@@ -1,4 +1,4 @@
-# HANDOFF — Assetto Corsa iOS Port (Phase 8.2, after /compact)
+# HANDOFF — Assetto Corsa iOS Port (NEXT PHASE: UX/Controls)
 
 ## ГДЕ ВСЁ НАХОДИТСЯ
 
@@ -37,8 +37,27 @@
    `filterable`-устройствах. 10/10 regression-тестов PASS, полный lib 37 PASS,
    ARM64 `cargo check` PASS. Отчёт `phase8/PHASE8_2_REPORT.md`.
 
-**НЕ ПРОВЕРЕНО НА iPhone после Phase 8.2** — пользователь должен переустановить
-новую IPA и нажать Drive.
+**Phase 8.2 IPA ПОДТВЕРЖДЕНА РАБОТАЮЩЕЙ на iPhone** (пользователь видел реальную
+AC-сцену, машина едет, телеметрия/камеры работают). Скриншот:
+`phase8/iphone_scene_2026-11-18.png`.
+
+## NEXT PHASE (UX/Controls) — сделано локально, IPA в процессе
+
+- `ios/GameViewController.m` переписан: видимый аналоговый руль, GAS/BRAKE
+  педали, GEAR+/-, HANDBRAKE, CAMERA, MENU; компактное меню 32% ширины;
+  HUD и отдельная выключаемая debug-панель (FPS, render ms, Metal features).
+- Инверсия: в FFI/физике знака нет (`feed.rs:43 positive = right`); источник —
+  старый абсолютный touch-X без нейтрали. Новый руль — относительный drag.
+- Камера: `render.rs::camera_next()` теперь вызывает upstream `f1()` — доступен
+  настоящий cockpit с оригинальным 3D-рулём.
+- Графика: `render.rs` теперь берёт `RaceLook::of(race.ini)` (sun/weather/
+  sun_animation/groove) как Windows full_frame — раньше было захардкожено
+  `sun_angle=0`, `weather=""`, из-за чего не применялась AC-погода.
+- Локально: sampler 10/10, lib 37, iOS cargo check PASS, C-тесты PASS,
+  verify_ios_project 52/52, prepush audit PASS.
+- Отчёт `phase9/NEXT_PHASE_REPORT.md`, патч `patches/next_phase/`,
+  чекпоинты `checkpoint/before_next_phase/`, `checkpoint/after_next_phase/`.
+- **Новый UI на iPhone ещё не проверен** — нужно поставить новую IPA.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 
@@ -70,7 +89,8 @@
 
 ## СЛЕДУЮЩИЙ ШАГ
 
-1. ✅ Закоммичено (`d5ace5a`), CI `44359519473` success, артефакт скачан, аудит структуры PASS, IPA на столе (старая Phase 8.1 заменена новой — это правильно).
+1. Phase 8.2: ✅ `d5ace5a`, CI `44359519473` success, IPA на столе.
+2. NEXT PHASE: закоммитить, собрать новую IPA, проверить touch/меню/HUD/cockpit/графику на iPhone. Старую рабочую IPA НЕ удалять до успеха новой.
 2. Пользователь переустанавливает IPA → машина/трасса → Drive.
 3. Если сцена появилась → закрыть Phase 8.2. Если новая ошибка → точный текст + `crash pull`, отдельный issue.
 
