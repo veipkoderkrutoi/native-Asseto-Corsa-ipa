@@ -12,9 +12,9 @@ permissions:
 
 jobs:
   build-unsigned:
-    # macOS arm64 runners were unavailable ("job was not acquired by Runner");
-    # the Intel image has the same Xcode/iPhoneOS SDK and better capacity.
-    runs-on: macos-15-intel
+    # Intel macOS images; arm64 runners and macos-15-intel were intermittently
+    # unavailable ("job was not acquired by Runner"). Both have Xcode/iPhoneOS SDK.
+    runs-on: macos-26-intel
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
