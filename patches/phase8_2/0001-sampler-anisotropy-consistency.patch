@@ -1,0 +1,393 @@
+﻿diff --git a/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/kgl_wgpu.rs b/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/kgl_wgpu.rs
+index b9b541e..b667366 100644
+--- a/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/kgl_wgpu.rs
++++ b/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/kgl_wgpu.rs
+@@ -397,6 +397,135 @@ pub(crate) fn sampler_filter_mode(kind: i32, filterable: bool) -> wgpu::FilterMo
+     }
+ }
+ 
++/// Complete, device-independent sampler configuration. Both the descriptor and
++/// the bind group layout are derived from this, so they cannot disagree.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct SamplerConfig {
++    pub mag_filter: wgpu::FilterMode,
++    pub min_filter: wgpu::FilterMode,
++    pub mipmap_filter: wgpu::MipmapFilterMode,
++    pub anisotropy_clamp: u16,
++    pub compare: Option<wgpu::CompareFunction>,
++    pub binding_type: wgpu::SamplerBindingType,
++}
++
++impl SamplerConfig {
++    /// wgpu-core 30.0.1 device/resource.rs:2288 requires all three filters to
++    /// be Linear when anisotropy_clamp != 1. Sampler filtering (used by the
++    /// bind group check) is min_filter == Linear || mag_filter == Linear.
++    pub(crate) fn is_wgpu_valid(&self) -> bool {
++        if self.anisotropy_clamp < 1 {
++            return false;
++        }
++        if self.anisotropy_clamp != 1
++            && (self.min_filter != wgpu::FilterMode::Linear
++                || self.mag_filter != wgpu::FilterMode::Linear
++                || self.mipmap_filter != wgpu::MipmapFilterMode::Linear)
++        {
++            return false;
++        }
++        match self.binding_type {
++            wgpu::SamplerBindingType::Filtering => !self.is_comparison(),
++            wgpu::SamplerBindingType::NonFiltering => {
++                !self.is_comparison() && !self.is_filtering()
++            }
++            wgpu::SamplerBindingType::Comparison => self.is_comparison(),
++        }
++    }
++
++    pub(crate) fn is_filtering(&self) -> bool {
++        self.min_filter == wgpu::FilterMode::Linear || self.mag_filter == wgpu::FilterMode::Linear
++    }
++
++    pub(crate) fn is_comparison(&self) -> bool {
++        self.compare.is_some()
++    }
++}
++
++/// The mipmap filter paired with `sampler_filter_mode` in create_sampler.
++pub(crate) fn sampler_mipmap_mode(kind: i32, filter: wgpu::FilterMode) -> wgpu::MipmapFilterMode {
++    if filter == wgpu::FilterMode::Nearest || kind == 3 {
++        wgpu::MipmapFilterMode::Nearest
++    } else {
++        wgpu::MipmapFilterMode::Linear
++    }
++}
++
++/// Anisotropy > 1 requires all filters Linear (wgpu-core 30.0.1). On adapters
++/// without FLOAT32_FILTERABLE the layout is NonFiltering, which requires the
++/// sampler to be Nearest тАФ therefore anisotropy must collapse to 1 there.
++pub(crate) fn sampler_anisotropy_clamp(kind: i32, filterable: bool, requested: i32) -> u16 {
++    if !filterable || kind != 0 {
++        1
++    } else {
++        requested.clamp(1, 16) as u16
++    }
++}
++
++/// Build the exact configuration used for a sampler at a kgl slot.
++pub(crate) fn sampler_config(kind: i32, filterable: bool, requested_anisotropy: i32, comparison: bool) -> SamplerConfig {
++    // kind 3 is the comparison sampler and keeps Linear filters (its own
++    // Comparison binding type). A *plain* kind-3 sampler is never bound to a
++    // Comparison slot, so on a NonFiltering layout it must still be Nearest.
++    let filter = if comparison || filterable {
++        sampler_filter_mode(kind, filterable)
++    } else {
++        wgpu::FilterMode::Nearest
++    };
++    SamplerConfig {
++        mag_filter: filter,
++        min_filter: filter,
++        mipmap_filter: sampler_mipmap_mode(kind, filter),
++        anisotropy_clamp: if comparison {
++            1 // keep the original comparison-sampler behaviour (no aniso PCF change)
++        } else {
++            sampler_anisotropy_clamp(kind, filterable, requested_anisotropy)
++        },
++        compare: if comparison {
++            Some(if kind == 3 { wgpu::CompareFunction::Less } else { wgpu::CompareFunction::Never })
++        } else {
++            None
++        },
++        binding_type: sampler_filtering_type(filterable, comparison),
++    }
++}
++
++/// Configuration of the device-wide default sampler (Direct3D's linear/clamped).
++pub(crate) fn default_sampler_config(filterable: bool, comparison: bool) -> SamplerConfig {
++    if comparison {
++        SamplerConfig {
++            // Comparison sampling keeps its original PCF behaviour: Linear min/mag,
++            // Nearest mip and no anisotropy, independent of FLOAT32_FILTERABLE.
++            mag_filter: wgpu::FilterMode::Linear,
++            min_filter: wgpu::FilterMode::Linear,
++            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
++            anisotropy_clamp: 1,
++            compare: Some(wgpu::CompareFunction::Never),
++            binding_type: wgpu::SamplerBindingType::Comparison,
++        }
++    } else {
++        sampler_config(0, filterable, 1, false)
++    }
++}
++
++/// Turn a configuration into the descriptor actually passed to create_sampler.
++pub(crate) fn sampler_descriptor(config: SamplerConfig, address: wgpu::AddressMode) -> wgpu::SamplerDescriptor<'static> {
++    wgpu::SamplerDescriptor {
++        label: None,
++        address_mode_u: address,
++        address_mode_v: address,
++        address_mode_w: address,
++        mag_filter: config.mag_filter,
++        min_filter: config.min_filter,
++        mipmap_filter: config.mipmap_filter,
++        lod_min_clamp: 0.0,
++        lod_max_clamp: 32.0,
++        compare: config.compare,
++        anisotropy_clamp: config.anisotropy_clamp,
++        border_color: None,
++    }
++}
++
+ const FULLSCREEN_VS: &str = "
+ struct V { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> }
+ @vertex fn vs(@builtin(vertex_index) i: u32) -> V {
+@@ -491,28 +620,15 @@ impl Kgl {
+         let dummy_cube = dummy(wgpu::TextureFormat::Rgba8Unorm, 6, 1, true);
+         let dummy_depth = dummy(wgpu::TextureFormat::Depth32Float, 1, 1, false);
+         let dummy_ms = dummy(wgpu::TextureFormat::Rgba8Unorm, 1, 4, false);
+-        // Direct3D 11's default sampler: linear, clamped. On adapters without
+-        // FLOAT32_FILTERABLE (iOS Metal) the layout is NonFiltering, so the
+-        // default sampler must also be Nearest to pass wgpu validation.
+-        let default_filter = if features.contains(wgpu::Features::FLOAT32_FILTERABLE) {
+-            wgpu::FilterMode::Linear
+-        } else {
+-            wgpu::FilterMode::Nearest
+-        };
+-        let default_mip = if features.contains(wgpu::Features::FLOAT32_FILTERABLE) {
+-            wgpu::MipmapFilterMode::Linear
+-        } else {
+-            wgpu::MipmapFilterMode::Nearest
+-        };
++        // Direct3D 11's default sampler: linear, clamped. Both variants come
++        // from the same configuration helpers as the per-slot samplers, so the
++        // layout/binding and anisotropy rules are enforced in one place.
++        let default_filterable = features.contains(wgpu::Features::FLOAT32_FILTERABLE);
++        let default_plain_cfg = default_sampler_config(default_filterable, false);
++        let default_comparison_cfg = default_sampler_config(default_filterable, true);
+         let default_sampler = Sampler(Rc::new(SamplerInner {
+-            plain: device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: default_filter, min_filter: default_filter, mipmap_filter: default_mip, lod_max_clamp: 32.0, ..Default::default() }),
+-            comparison: device.create_sampler(&wgpu::SamplerDescriptor {
+-                mag_filter: wgpu::FilterMode::Linear,
+-                min_filter: wgpu::FilterMode::Linear,
+-                compare: Some(wgpu::CompareFunction::Never),
+-                lod_max_clamp: 32.0,
+-                ..Default::default()
+-            }),
++            plain: device.create_sampler(&sampler_descriptor(default_plain_cfg, wgpu::AddressMode::ClampToEdge)),
++            comparison: device.create_sampler(&sampler_descriptor(default_comparison_cfg, wgpu::AddressMode::ClampToEdge)),
+         }));
+         let mut kgl = Kgl {
+             device,
+@@ -721,29 +837,17 @@ impl Kgl {
+         // the sampler itself to be non-filtering (Nearest). Both decisions come
+         // from the same pure helpers so layout and descriptor can never diverge.
+         let filterable = self.features.contains(wgpu::Features::FLOAT32_FILTERABLE);
+-        let filter = sampler_filter_mode(kind, filterable);
+-        let mip = if filter == wgpu::FilterMode::Nearest || kind == 3 {
+-            wgpu::MipmapFilterMode::Nearest
+-        } else {
+-            wgpu::MipmapFilterMode::Linear
+-        };
+-        let anisotropy = if kind == 0 { max_anisotropy.clamp(1, 16) as u16 } else { 1 };
+-        let base = wgpu::SamplerDescriptor {
+-            label: None,
+-            address_mode_u: address,
+-            address_mode_v: address,
+-            address_mode_w: address,
+-            mag_filter: filter,
+-            min_filter: filter,
+-            mipmap_filter: mip,
+-            lod_min_clamp: 0.0,
+-            lod_max_clamp: 32.0,
+-            compare: None,
+-            anisotropy_clamp: anisotropy,
+-            border_color: None,
+-        };
+-        let plain = self.device.create_sampler(&base);
+-        let comparison = self.device.create_sampler(&wgpu::SamplerDescriptor { compare: Some(if kind == 3 { wgpu::CompareFunction::Less } else { wgpu::CompareFunction::Never }), anisotropy_clamp: 1, ..base });
++        // One source of truth for the three filters, anisotropy and bind type.
++        // On iOS Metal (no FLOAT32_FILTERABLE) kind 0 used to get Nearest filters
++        // with anisotropy 4, which wgpu-core rejects: anisotropy != 1 demands
++        // Linear everywhere. The NonFiltering layout also forbids Linear there,
++        // so anisotropy collapses to 1 on that path instead of forcing Linear.
++        let plain_cfg = sampler_config(kind, filterable, max_anisotropy, false);
++        let comparison_cfg = sampler_config(kind, filterable, max_anisotropy, true);
++        debug_assert!(plain_cfg.is_wgpu_valid(), "invalid plain sampler config: {plain_cfg:?}");
++        debug_assert!(comparison_cfg.is_wgpu_valid(), "invalid comparison sampler config: {comparison_cfg:?}");
++        let plain = self.device.create_sampler(&sampler_descriptor(plain_cfg, address));
++        let comparison = self.device.create_sampler(&sampler_descriptor(comparison_cfg, address));
+         let sampler = Sampler(Rc::new(SamplerInner { plain, comparison }));
+         let name = kgl_log::sampler_name(kind, clamp, max_anisotropy, mip_lod_bias);
+         kgl_log::set_name(key(&sampler.0), &name);
+@@ -2045,14 +2149,23 @@ fn same_view(a: &Option<View>, b: &Option<View>) -> bool {
+ mod sampler_validation_tests {
+     use super::*;
+ 
+-    // A non-filtering binding must never be paired with a Linear sampler.
+-    // This is the exact mismatch that crashed the real iPhone (Metal, no
+-    // FLOAT32_FILTERABLE): layout NonFiltering + sampler Linear.
++    // The descriptor is what create_sampler really passes to wgpu. Checking it
++    // (rather than only the helpers) makes sure no creation site drifts.
++    fn assert_descriptor_matches(desc: &wgpu::SamplerDescriptor<'_>, cfg: SamplerConfig) {
++        assert_eq!(desc.mag_filter, cfg.mag_filter, "mag_filter mismatch: {cfg:?}");
++        assert_eq!(desc.min_filter, cfg.min_filter, "min_filter mismatch: {cfg:?}");
++        assert_eq!(desc.mipmap_filter, cfg.mipmap_filter, "mipmap_filter mismatch: {cfg:?}");
++        assert_eq!(desc.anisotropy_clamp, cfg.anisotropy_clamp, "anisotropy mismatch: {cfg:?}");
++        assert_eq!(desc.compare, cfg.compare, "compare mismatch: {cfg:?}");
++        assert!(cfg.is_wgpu_valid(), "invalid sampler config reached descriptor: {cfg:?}");
++    }
++
++    // Phase 8.1: a non-filtering binding must never be paired with a Linear
++    // sampler (the original iPhone crash: layout NonFiltering + sampler Linear).
+     #[test]
+     fn non_filtering_layout_uses_nearest_sampler() {
+         let filterable = false;
+-        let binding = sampler_filtering_type(filterable, false);
+-        assert_eq!(binding, wgpu::SamplerBindingType::NonFiltering);
++        assert_eq!(sampler_filtering_type(filterable, false), wgpu::SamplerBindingType::NonFiltering);
+         for kind in [0, 1, 2, 4] {
+             assert_eq!(sampler_filter_mode(kind, filterable), wgpu::FilterMode::Nearest,
+                        "kind {kind} must be Nearest when layout is NonFiltering");
+@@ -2063,8 +2176,6 @@ mod sampler_validation_tests {
+     fn filtering_layout_uses_linear_sampler() {
+         let filterable = true;
+         assert_eq!(sampler_filtering_type(filterable, false), wgpu::SamplerBindingType::Filtering);
+-        // kind 2 is an explicit point/nearest sample and stays Nearest, which is
+-        // still valid for a Filtering binding (wgpu allows Nearest in Filtering).
+         assert_eq!(sampler_filter_mode(0, filterable), wgpu::FilterMode::Linear);
+         assert_eq!(sampler_filter_mode(1, filterable), wgpu::FilterMode::Linear);
+     }
+@@ -2073,17 +2184,130 @@ mod sampler_validation_tests {
+     fn comparison_binding_is_separate_and_keeps_linear() {
+         assert_eq!(sampler_filtering_type(false, true), wgpu::SamplerBindingType::Comparison);
+         assert_eq!(sampler_filtering_type(true, true), wgpu::SamplerBindingType::Comparison);
+-        // comparison sampler binding is independent of float filterable; its
+-        // filtering is legal because it uses sampler_comparison in WGSL.
+         assert_eq!(sampler_filter_mode(3, false), wgpu::FilterMode::Linear);
+     }
+ 
+-    // The default sampler must follow the same rule as created samplers.
++    // Phase 8.1 default sampler rule is preserved.
+     #[test]
+     fn default_sampler_matches_layout_on_ios_like_device() {
+         let filterable = false;
+-        let filter = if filterable { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
+-        assert_eq!(filter, sampler_filter_mode(0, filterable));
+-        assert_eq!(sampler_filtering_type(filterable, false), wgpu::SamplerBindingType::NonFiltering);
++        let cfg = default_sampler_config(filterable, false);
++        assert_eq!(cfg.binding_type, sampler_filtering_type(filterable, false));
++        assert_eq!(cfg.min_filter, sampler_filter_mode(0, filterable));
++        assert_descriptor_matches(&sampler_descriptor(cfg, wgpu::AddressMode::ClampToEdge), cfg);
++    }
++
++    // 1. NonFiltering: Nearest + anisotropy 1 тАФ the iPhone 13 Pro Max path.
++    #[test]
++    fn non_filtering_config_is_nearest_with_anisotropy_one() {
++        for kind in [0, 1, 2, 4] {
++            for requested in [1, 2, 4, 8, 16] {
++                let cfg = sampler_config(kind, false, requested, false);
++                assert_eq!(cfg.binding_type, wgpu::SamplerBindingType::NonFiltering, "kind {kind} requested {requested}");
++                assert_eq!(cfg.min_filter, wgpu::FilterMode::Nearest);
++                assert_eq!(cfg.mag_filter, wgpu::FilterMode::Nearest);
++                assert_eq!(cfg.mipmap_filter, wgpu::MipmapFilterMode::Nearest);
++                assert_eq!(cfg.anisotropy_clamp, 1, "anisotropy must collapse to 1 for NonFiltering");
++                assert!(!cfg.is_filtering());
++                assert_descriptor_matches(&sampler_descriptor(cfg, wgpu::AddressMode::Repeat), cfg);
++            }
++        }
++    }
++
++    // 2. Filtering: all three Linear + anisotropy 4 (where float filtering exists).
++    #[test]
++    fn filtering_config_is_linear_with_anisotropy_four() {
++        let cfg = sampler_config(0, true, 4, false);
++        assert_eq!(cfg.binding_type, wgpu::SamplerBindingType::Filtering);
++        assert_eq!(cfg.min_filter, wgpu::FilterMode::Linear);
++        assert_eq!(cfg.mag_filter, wgpu::FilterMode::Linear);
++        assert_eq!(cfg.mipmap_filter, wgpu::MipmapFilterMode::Linear);
++        assert_eq!(cfg.anisotropy_clamp, 4);
++        assert!(cfg.is_filtering());
++        assert_descriptor_matches(&sampler_descriptor(cfg, wgpu::AddressMode::Repeat), cfg);
++    }
++
++    // 3. The exact Phase 8.2 bug must be unrepresentable: never Nearest + aniso 4.
++    #[test]
++    fn non_filtering_with_anisotropy_four_is_rejected() {
++        for requested in [2, 4, 8, 16] {
++            let cfg = sampler_config(0, false, requested, false);
++            assert_eq!(cfg.anisotropy_clamp, 1, "requested {requested} must be clamped to 1 on NonFiltering");
++        }
++        // A deliberately malformed descriptor combination must fail validation.
++        let bad = SamplerConfig {
++            mag_filter: wgpu::FilterMode::Nearest,
++            min_filter: wgpu::FilterMode::Nearest,
++            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
++            anisotropy_clamp: 4,
++            compare: None,
++            binding_type: wgpu::SamplerBindingType::NonFiltering,
++        };
++        assert!(!bad.is_wgpu_valid(), "Nearest + anisotropy 4 must be rejected");
++    }
++
++    // 4. Both default samplers are valid and categorized correctly.
++    #[test]
++    fn default_samplers_match_binding_and_anisotropy() {
++        for filterable in [false, true] {
++            let plain = default_sampler_config(filterable, false);
++            assert_eq!(plain.binding_type, sampler_filtering_type(filterable, false));
++            assert_eq!(plain.anisotropy_clamp, 1);
++            assert_descriptor_matches(&sampler_descriptor(plain, wgpu::AddressMode::ClampToEdge), plain);
++
++            let comparison = default_sampler_config(filterable, true);
++            assert_eq!(comparison.binding_type, wgpu::SamplerBindingType::Comparison);
++            assert_eq!(comparison.compare, Some(wgpu::CompareFunction::Never));
++            assert_eq!(comparison.anisotropy_clamp, 1);
++            assert!(comparison.is_wgpu_valid());
++            assert_descriptor_matches(&sampler_descriptor(comparison, wgpu::AddressMode::ClampToEdge), comparison);
++        }
++    }
++
++    // 5. Comparison samplers keep their binding type, compare function and
++    //    legal filters (including the original kind 3 PCF behaviour).
++    #[test]
++    fn comparison_samplers_are_separate_and_valid() {
++        for filterable in [false, true] {
++            for kind in [0, 3] {
++                let cfg = sampler_config(kind, filterable, 4, true);
++                assert_eq!(cfg.binding_type, wgpu::SamplerBindingType::Comparison);
++                assert_eq!(cfg.compare, Some(if kind == 3 { wgpu::CompareFunction::Less } else { wgpu::CompareFunction::Never }));
++                assert_eq!(cfg.anisotropy_clamp, 1);
++                assert!(cfg.is_comparison());
++                assert!(cfg.is_wgpu_valid());
++                assert_descriptor_matches(&sampler_descriptor(cfg, wgpu::AddressMode::Repeat), cfg);
++            }
++        }
++        // kind 3 keeps Linear min/mag even without FLOAT32_FILTERABLE.
++        assert_eq!(sampler_config(3, false, 4, true).min_filter, wgpu::FilterMode::Linear);
++    }
++
++    // 6. Exhaustive layout/descriptor agreement over every category.
++    #[test]
++    fn every_category_has_consistent_layout_and_descriptor() {
++        for kind in [0, 1, 2, 3, 4] {
++            for filterable in [false, true] {
++                for comparison in [false, true] {
++                    for requested in [1, 4, 16] {
++                        let cfg = sampler_config(kind, filterable, requested, comparison);
++                        assert_eq!(cfg.binding_type, sampler_filtering_type(filterable, comparison),
++                                   "layout and descriptor diverged: kind {kind} filterable {filterable} comparison {comparison}");
++                        assert!(cfg.is_wgpu_valid(), "invalid config: {cfg:?}");
++                        if cfg.binding_type == wgpu::SamplerBindingType::NonFiltering {
++                            assert!(!cfg.is_filtering() && !cfg.is_comparison());
++                            assert_eq!(cfg.anisotropy_clamp, 1);
++                        }
++                        if cfg.anisotropy_clamp != 1 {
++                            assert_eq!(cfg.min_filter, wgpu::FilterMode::Linear);
++                            assert_eq!(cfg.mag_filter, wgpu::FilterMode::Linear);
++                            assert_eq!(cfg.mipmap_filter, wgpu::MipmapFilterMode::Linear);
++                        }
++                        let desc = sampler_descriptor(cfg, wgpu::AddressMode::ClampToEdge);
++                        assert_descriptor_matches(&desc, cfg);
++                    }
++                }
++            }
++        }
+     }
+ }
