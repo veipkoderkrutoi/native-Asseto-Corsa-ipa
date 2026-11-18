@@ -5,7 +5,7 @@
 - Проект: `D:\opencode-sandbox\ac-ios-port`
 - GitHub: `veipkoderkrutoi/native-Asseto-Corsa-ipa`, ветка `main`
 - Рабочий стол: `C:\Users\User\Desktop\AC-iOS-content-pack`
-  - `AC-iOS-Prot-unsigned.ipa` — сейчас ещё сборка Phase 8.1 (SHA `deb5da3623a8639179fd74e2d44f8ada1b5434ba275a1388e2c307dda`), её заменит новая Phase 8.2
+  - `AC-iOS-Prot-unsigned.ipa` — **сборка Phase 8.2**, CI `44359519473` success, SHA-256 `6765c9c0ba869336db15b53489c81707199282329b6340c58a8e295c5256280f`, 4,301,011 B, аудит структуры PASS. Старая Phase 8.1 была `deb5da36...`.
   - `AC-iOS\` — папка контента (3 машины + 2 трассы, 927 МиБ)
 - Оригинальная игра: `D:\Games\assettocorsa` (AC 1.16.2)
 - CI-репозиторий-зеркало для коммитов: `D:\opencode-sandbox\gha-repo` (`.git` там)
@@ -27,7 +27,7 @@
    Причина: layout `NonFiltering` (нет `FLOAT32_FILTERABLE` на Metal), sampler — Linear.
    Фикс: `sampler_filtering_type()` / `sampler_filter_mode()`, iOS → Nearest.
 
-2. **Phase 8.2** (исправлено локально, новая IPA в процессе):
+2. **Phase 8.2** (исправлено, новая IPA собрана и лежит на столе):
    `invalid filter mode for anisotropic clamp: nearest when anisotropic clamp is not 1 (it's 4)`.
    Причина: на iOS `kind 0` получал Nearest (из 8.1) + `anisotropy_clamp=4`.
    wgpu-core 30.0.1 `device/resource.rs:2288–2316`: aniso≠1 ⇒ все 3 фильтра Linear.
@@ -70,7 +70,7 @@
 
 ## СЛЕДУЮЩИЙ ШАГ
 
-1. Закоммитить Phase 8.2, запустить CI, скачать артефакт, положить на стол (НЕ подменять старой IPA).
+1. ✅ Закоммичено (`d5ace5a`), CI `44359519473` success, артефакт скачан, аудит структуры PASS, IPA на столе (старая Phase 8.1 заменена новой — это правильно).
 2. Пользователь переустанавливает IPA → машина/трасса → Drive.
 3. Если сцена появилась → закрыть Phase 8.2. Если новая ошибка → точный текст + `crash pull`, отдельный issue.
 
