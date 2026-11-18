@@ -98,6 +98,11 @@
     return self;
 }
 
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    _rotor.frame = CGRectInset(self.bounds, 6.0, 6.0);
+}
+
 - (void)setValue:(float)value {
     if (isnan(value)) value = 0.0f;
     value = MAX(-1.0f, MIN(1.0f, value));
@@ -186,14 +191,19 @@
     return self;
 }
 
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = self.bounds.size.height;
+    _fill.frame = CGRectMake(2, h * (1.0 - self.value), self.bounds.size.width - 4, h * self.value);
+    _title.frame = CGRectMake(0, h - 26.0, self.bounds.size.width, 20.0);
+}
+
 - (void)setValue:(float)value {
     if (isnan(value)) value = 0.0f;
     value = MAX(0.0f, MIN(1.0f, value));
     if (_value == value) return;
     _value = value;
-    CGFloat h = self.bounds.size.height;
-    _fill.frame = CGRectMake(2, h * (1.0 - value), self.bounds.size.width - 4, h * value);
-    _title.frame = CGRectMake(0, h - 26.0, self.bounds.size.width, 20.0);
+    [self layoutSubviews];
     if (self.valueChanged) self.valueChanged(value);
 }
 
