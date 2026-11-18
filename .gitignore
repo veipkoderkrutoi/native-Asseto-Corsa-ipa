@@ -7,6 +7,11 @@ third_party/rustyAC-src/rustyAC-master/web/
 third_party/rustyAC-src/rustyAC-master/server/
 third_party/rustyAC-src/rustyAC-master/.github/
 
+# Personal content pack: original AC assets, NEVER commit or upload to CI
+content_pack/
+content_pack_transfer.zip
+phase7/render_checks/*/
+
 # Local build products (rebuilt in CI; keep the repository small)
 rust/target/
 third_party/rustyAC-src/rustyAC-master/target/
