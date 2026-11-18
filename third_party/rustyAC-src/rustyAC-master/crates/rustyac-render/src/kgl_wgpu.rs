@@ -373,6 +373,30 @@ pub fn wanted_features(adapter: wgpu::Features) -> wgpu::Features {
     adapter & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE | wgpu::Features::POLYGON_MODE_LINE)
 }
 
+/// The sampler binding type a program layout must declare for a given device.
+/// Kept as a pure function so it can be tested without a GPU: layout and sampler
+/// descriptors must both use this result, otherwise Metal/D3D wgpu validation
+/// fails with "sampler expects filtering = false but given filtering = true".
+pub(crate) fn sampler_filtering_type(filterable: bool, comparison: bool) -> wgpu::SamplerBindingType {
+    if comparison {
+        wgpu::SamplerBindingType::Comparison
+    } else if filterable {
+        wgpu::SamplerBindingType::Filtering
+    } else {
+        wgpu::SamplerBindingType::NonFiltering
+    }
+}
+
+/// The min/mag filter a sampler must use to match the binding type above.
+pub(crate) fn sampler_filter_mode(kind: i32, filterable: bool) -> wgpu::FilterMode {
+    match kind {
+        2 => wgpu::FilterMode::Nearest,
+        3 => wgpu::FilterMode::Linear, // comparison sampler (separate binding type)
+        _ if !filterable => wgpu::FilterMode::Nearest,
+        _ => wgpu::FilterMode::Linear,
+    }
+}
+
 const FULLSCREEN_VS: &str = "
 struct V { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> }
 @vertex fn vs(@builtin(vertex_index) i: u32) -> V {
@@ -467,9 +491,21 @@ impl Kgl {
         let dummy_cube = dummy(wgpu::TextureFormat::Rgba8Unorm, 6, 1, true);
         let dummy_depth = dummy(wgpu::TextureFormat::Depth32Float, 1, 1, false);
         let dummy_ms = dummy(wgpu::TextureFormat::Rgba8Unorm, 1, 4, false);
-        // Direct3D 11's default sampler: linear, clamped
+        // Direct3D 11's default sampler: linear, clamped. On adapters without
+        // FLOAT32_FILTERABLE (iOS Metal) the layout is NonFiltering, so the
+        // default sampler must also be Nearest to pass wgpu validation.
+        let default_filter = if features.contains(wgpu::Features::FLOAT32_FILTERABLE) {
+            wgpu::FilterMode::Linear
+        } else {
+            wgpu::FilterMode::Nearest
+        };
+        let default_mip = if features.contains(wgpu::Features::FLOAT32_FILTERABLE) {
+            wgpu::MipmapFilterMode::Linear
+        } else {
+            wgpu::MipmapFilterMode::Nearest
+        };
         let default_sampler = Sampler(Rc::new(SamplerInner {
-            plain: device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, mipmap_filter: wgpu::MipmapFilterMode::Linear, lod_max_clamp: 32.0, ..Default::default() }),
+            plain: device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: default_filter, min_filter: default_filter, mipmap_filter: default_mip, lod_max_clamp: 32.0, ..Default::default() }),
             comparison: device.create_sampler(&wgpu::SamplerDescriptor {
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
@@ -680,10 +716,16 @@ impl Kgl {
     /// left out.)
     pub fn create_sampler(&self, kind: i32, clamp: bool, max_anisotropy: i32, mip_lod_bias: f32) -> Option<Sampler> {
         let address = if clamp { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
-        let (filter, mip) = match kind {
-            2 => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest),
-            3 => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Nearest),
-            _ => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear),
+        // Bind group layouts declare SamplerBindingType::NonFiltering when the
+        // adapter lacks FLOAT32_FILTERABLE (e.g. Metal on iOS). wgpu then requires
+        // the sampler itself to be non-filtering (Nearest). Both decisions come
+        // from the same pure helpers so layout and descriptor can never diverge.
+        let filterable = self.features.contains(wgpu::Features::FLOAT32_FILTERABLE);
+        let filter = sampler_filter_mode(kind, filterable);
+        let mip = if filter == wgpu::FilterMode::Nearest || kind == 3 {
+            wgpu::MipmapFilterMode::Nearest
+        } else {
+            wgpu::MipmapFilterMode::Linear
         };
         let anisotropy = if kind == 0 { max_anisotropy.clamp(1, 16) as u16 } else { 1 };
         let base = wgpu::SamplerDescriptor {
@@ -1368,13 +1410,7 @@ impl Kgl {
                     .map(|s| wgpu::BindGroupLayoutEntry {
                         binding: s.slot,
                         visibility: vis(s.vertex, s.pixel),
-                        ty: wgpu::BindingType::Sampler(if s.comparison {
-                            wgpu::SamplerBindingType::Comparison
-                        } else if filterable {
-                            wgpu::SamplerBindingType::Filtering
-                        } else {
-                            wgpu::SamplerBindingType::NonFiltering
-                        }),
+                        ty: wgpu::BindingType::Sampler(sampler_filtering_type(filterable, s.comparison)),
                         count: None,
                     })
                     .collect();
@@ -2002,5 +2038,52 @@ fn same_view(a: &Option<View>, b: &Option<View>) -> bool {
         (None, None) => true,
         (Some(a), Some(b)) => Rc::ptr_eq(&a.0, &b.0),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod sampler_validation_tests {
+    use super::*;
+
+    // A non-filtering binding must never be paired with a Linear sampler.
+    // This is the exact mismatch that crashed the real iPhone (Metal, no
+    // FLOAT32_FILTERABLE): layout NonFiltering + sampler Linear.
+    #[test]
+    fn non_filtering_layout_uses_nearest_sampler() {
+        let filterable = false;
+        let binding = sampler_filtering_type(filterable, false);
+        assert_eq!(binding, wgpu::SamplerBindingType::NonFiltering);
+        for kind in [0, 1, 2, 4] {
+            assert_eq!(sampler_filter_mode(kind, filterable), wgpu::FilterMode::Nearest,
+                       "kind {kind} must be Nearest when layout is NonFiltering");
+        }
+    }
+
+    #[test]
+    fn filtering_layout_uses_linear_sampler() {
+        let filterable = true;
+        assert_eq!(sampler_filtering_type(filterable, false), wgpu::SamplerBindingType::Filtering);
+        // kind 2 is an explicit point/nearest sample and stays Nearest, which is
+        // still valid for a Filtering binding (wgpu allows Nearest in Filtering).
+        assert_eq!(sampler_filter_mode(0, filterable), wgpu::FilterMode::Linear);
+        assert_eq!(sampler_filter_mode(1, filterable), wgpu::FilterMode::Linear);
+    }
+
+    #[test]
+    fn comparison_binding_is_separate_and_keeps_linear() {
+        assert_eq!(sampler_filtering_type(false, true), wgpu::SamplerBindingType::Comparison);
+        assert_eq!(sampler_filtering_type(true, true), wgpu::SamplerBindingType::Comparison);
+        // comparison sampler binding is independent of float filterable; its
+        // filtering is legal because it uses sampler_comparison in WGSL.
+        assert_eq!(sampler_filter_mode(3, false), wgpu::FilterMode::Linear);
+    }
+
+    // The default sampler must follow the same rule as created samplers.
+    #[test]
+    fn default_sampler_matches_layout_on_ios_like_device() {
+        let filterable = false;
+        let filter = if filterable { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
+        assert_eq!(filter, sampler_filter_mode(0, filterable));
+        assert_eq!(sampler_filtering_type(filterable, false), wgpu::SamplerBindingType::NonFiltering);
     }
 }
