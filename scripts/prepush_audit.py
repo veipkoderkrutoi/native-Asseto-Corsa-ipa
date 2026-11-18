@@ -25,7 +25,8 @@ IGNORE_DIRS = {
     "third_party/rustyAC-src/rustyAC-master/server",
     "third_party/rustyAC-src/rustyAC-master/.github",
     "build", "checkpoint", "__pycache__", ".git",
-    "content_pack", "phase7/render_checks", "phase7/pack_verify", "phase7/memory",
+    "content_pack", "ac_ios_content", "phase7/render_checks",
+    "phase7/pack_verify", "phase7/memory", "phase8/binary", "phase8/device_crashes",
 }
 IGNORE_GLOBS = ["*.zip", "*.ipa", "*.xcarchive", "*.pyc", ".DS_Store",
                 "artifacts/libac_ios_runtime.a"]
