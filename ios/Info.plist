@@ -20,7 +20,7 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>
-    <key>UIFileSharingEnabled</key><false/>
+    <key>UIFileSharingEnabled</key><true/>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Not used. The app reads only a car/track folder you import yourself.</string>
     <key>ITSAppUsesNonExemptEncryption</key><false/>

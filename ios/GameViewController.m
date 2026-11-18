@@ -297,7 +297,9 @@
 }
 
 - (void)updateStatus:(NSString *)text {
-    self.status.text = [text stringByAppendingString:@"\nTouch: steer / pedals · Camera button cycles views"];
+    self.status.text = [text stringByAppendingString:
+        @"\nTouch: steer / pedals · Camera button cycles views"
+         "\nImport: copy the AC-iOS folder into this app via iTunes/Finder File Sharing, or tap 'Choose AC folder'"];
 }
 
 #pragma mark - Input

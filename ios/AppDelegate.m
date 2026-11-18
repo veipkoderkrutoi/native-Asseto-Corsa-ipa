@@ -57,6 +57,19 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
         self.acRootURL = [AppDelegate resolveBookmark:bookmark];
     }
 
+    // Deterministic import path: the user copies the whole AC-iOS folder into
+    // the app's Documents via iTunes (Windows) / Finder (macOS) File Sharing.
+    // No archive extraction is required on the device.
+    if (!self.acRootURL) {
+        NSURL *docs = [[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
+                                                           inDomains:NSUserDomainMask] firstObject];
+        NSURL *bundledRoot = [docs URLByAppendingPathComponent:@"AC-iOS" isDirectory:YES];
+        NSString *cars = [bundledRoot.path stringByAppendingPathComponent:@"content/cars"];
+        if ([NSFileManager.defaultManager fileExistsAtPath:cars]) {
+            self.acRootURL = bundledRoot;
+        }
+    }
+
     GameViewController *game = [[GameViewController alloc] init];
     game.acRootURL = self.acRootURL;
     self.window.rootViewController = game;
