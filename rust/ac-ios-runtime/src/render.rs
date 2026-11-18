@@ -64,6 +64,39 @@ pub unsafe extern "C" fn ac_ios_render_init(
     if width < 16 || height < 16 {
         return err("size", err_buf, cap, "width and height must be >= 16");
     }
+    // Catch panics from upstream rustyAC/renderer so a load failure becomes a
+    // readable error in the UI/log instead of abort()/SIGABRT on iOS.
+    // panic_nounwind in the crash reports proves the panic escaped extern "C".
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_init_inner(session, width, height, err_buf, cap)
+    }));
+    match outcome {
+        Ok(code) => code,
+        Err(panic) => {
+            let message = panic_message(&panic);
+            eprintln!("ac_ios_render: PANIC CAUGHT: {message}");
+            err("panic", err_buf, cap, &format!("PANIC: {message}"))
+        }
+    }
+}
+
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+unsafe fn render_init_inner(
+    session: *mut c_void,
+    width: u32,
+    height: u32,
+    err_buf: *mut c_char,
+    cap: usize,
+) -> c_int {
     let result = with_session(session, |real| {
         let info = real.sim.car_info();
         let root = rustyac_game::sim::ac_root()
