@@ -12,6 +12,8 @@
 //! On iOS only, `metal` supplies the real CAMetalLayer -> wgpu -> kgl chain.
 
 #[cfg(target_os = "ios")]
+mod meminfo;
+#[cfg(target_os = "ios")]
 mod metal;
 #[cfg(target_os = "ios")]
 mod render;

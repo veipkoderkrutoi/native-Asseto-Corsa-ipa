@@ -97,6 +97,9 @@ unsafe fn render_init_inner(
     err_buf: *mut c_char,
     cap: usize,
 ) -> c_int {
+    #[cfg(target_os = "ios")]
+    crate::meminfo::log_event("LOAD", "track+car");
+
     let result = with_session(session, |real| {
         let info = real.sim.car_info();
         let root = rustyac_game::sim::ac_root()
@@ -141,6 +144,9 @@ unsafe fn render_init_inner(
         let camera = DrivingCamera::chase();
         Ok::<_, String>((renderer, shape, camera))
     });
+
+    #[cfg(target_os = "ios")]
+    crate::meminfo::log_event("GPU_UPLOAD_DONE", "track+car");
 
     let (renderer, shape, camera) = match result {
         Some(Ok(triple)) => triple,
@@ -268,5 +274,9 @@ pub(crate) fn camera_next() {
 
 #[no_mangle]
 pub extern "C" fn ac_ios_render_destroy() {
+    #[cfg(target_os = "ios")]
+    crate::meminfo::log_event("SCENE_RELEASE", "track+car");
     STATE.with(|slot| *slot.borrow_mut() = None);
+    #[cfg(target_os = "ios")]
+    crate::meminfo::log_event("SCENE_RELEASED", "track+car");
 }
