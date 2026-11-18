@@ -5,7 +5,8 @@
 - Проект: `D:\opencode-sandbox\ac-ios-port`
 - GitHub: `veipkoderkrutoi/native-Asseto-Corsa-ipa`, ветка `main`
 - Рабочий стол: `C:\Users\User\Desktop\AC-iOS-content-pack`
-  - `AC-iOS-Prot-unsigned.ipa` — **сборка Phase 8.2**, CI `44359519473` success, SHA-256 `6765c9c0ba869336db15b53489c81707199282329b6340c58a8e295c5256280f`, 4,301,011 B, аудит структуры PASS. Старая Phase 8.1 была `deb5da36...`.
+  - `AC-iOS-Prot-unsigned.ipa` — **сборка NEXT PHASE (новый UI)**, CI `44368896612` success, SHA-256 `21b58d2d4f53cd9cde6dfcf2924728d15838e09b8152c6bc27fb672b71b2e3ac`, 4,317,357 B, аудит PASS.
+- `AC-iOS-Prot-unsigned-Phase8.2-WORKING-backup.ipa` — предыдущая рабочая, SHA `6765c9c0…`. НЕ удалять, пока новый UI не подтверждён на iPhone.
   - `AC-iOS\` — папка контента (3 машины + 2 трассы, 927 МиБ)
 - Оригинальная игра: `D:\Games\assettocorsa` (AC 1.16.2)
 - CI-репозиторий-зеркало для коммитов: `D:\opencode-sandbox\gha-repo` (`.git` там)
