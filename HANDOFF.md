@@ -5,7 +5,8 @@
 - Проект: `D:\opencode-sandbox\ac-ios-port`
 - GitHub: `veipkoderkrutoi/native-Asseto-Corsa-ipa`, ветка `main`
 - Рабочий стол: `C:\Users\User\Desktop\AC-iOS-content-pack`
-  - `AC-iOS-Prot-unsigned.ipa` — **сборка Phase 9 Glow Up**, CI `44516784090` success, SHA-256 `1a1f017ea4013ce5e779bad3e8115f22d40e048d2b3cad699fc39f009ca61343`, 4,321,440 B, аудит PASS.
+  - `AC-iOS-Prot-unsigned.ipa` — **сборка Phase 10 (Jetsam fix)**, CI `44548143436` success, SHA-256 `f4cd29aabcc713d83c124a2b3729a5298d82bde3444e3a3f11d4ea4ca9172d6e`, 4,321,713 B, аудит PASS.
+  - `AC-iOS-Prot-unsigned-PrePhase10-WORKING-backup.ipa` — предыдущая Phase 9, SHA `1a1f017e…`.
 - `AC-iOS-Prot-unsigned-Phase8.2-WORKING-backup.ipa` — предыдущая рабочая, SHA `6765c9c0…`. НЕ удалять, пока новый UI не подтверждён на iPhone.
   - `AC-iOS\` — папка контента (3 машины + 2 трассы, 927 МиБ)
 - Оригинальная игра: `D:\Games\assettocorsa` (AC 1.16.2)

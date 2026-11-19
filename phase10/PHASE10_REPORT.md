@@ -134,7 +134,14 @@ classified; the fix is locally verified and built, but:
 
 ## Build / artifacts
 
-- Commit / CI run / IPA path / size / SHA-256: filled in after CI.
+- Commit: **`56fc1b7`** (pushed to `main`).
+- GitHub Actions run: **`44548143436`** — **SUCCESS** on `macos-26-intel`.
+- IPA: `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-Prot-unsigned.ipa`
+  - Size: **4,321,713 B**
+  - SHA-256: **`f4cd29aabcc713d83c124a2b3729a5298d82bde3444e3a3f11d4ea4ca9172d6e`**
+  - audit: `UNSIGNED IPA STRUCTURALLY VALID`
+- Previous Phase 9 build preserved as
+  `AC-iOS-Prot-unsigned-PrePhase10-WORKING-backup.ipa` (`1a1f017e…`).
 - Checkpoint before: `checkpoint/before_phase10/`; after: `checkpoint/after_phase10/`
 - Patch: `patches/phase10/`
 - Evidence: `phase10/crash_forensics/` (local only, PII excluded from commit)
