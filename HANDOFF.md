@@ -1,5 +1,12 @@
 # HANDOFF — Assetto Corsa iOS Port (Phase 11.7 Functional UI + Content)
 
+GitHub:
+- Latest release: `v0.11.7-phase11.7` — unsigned IPA + release notes:
+  https://github.com/veipkoderkrutoi/native-Asseto-Corsa-ipa/releases/tag/v0.11.7-phase11.7
+- Content pack instructions for other agents:
+  `docs/CONTENT_PACK_AGENT_INSTRUCTIONS.md`
+- README обновлён под текущее состояние (старый текст про «нет IPA» удалён).
+
 ## ГДЕ ВСЁ НАХОДИТСЯ
 
 - Проект: `D:\opencode-sandbox\ac-ios-port`
