@@ -27,6 +27,8 @@ IGNORE_DIRS = {
     "build", "checkpoint", "__pycache__", ".git",
     "content_pack", "ac_ios_content", "phase7/render_checks",
     "phase7/pack_verify", "phase7/memory", "phase8/binary", "phase8/device_crashes",
+    # Raw device syslog contains other apps' Apple IDs / PII: keep local only.
+    "phase10/crash_forensics",
 }
 IGNORE_GLOBS = ["*.zip", "*.ipa", "*.xcarchive", "*.pyc", ".DS_Store",
                 "artifacts/libac_ios_runtime.a"]

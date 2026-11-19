@@ -76,8 +76,52 @@ fn upload(kgl: &Kgl, width: u32, height: u32, format: DXGI_FORMAT, levels: &[(Ve
     }
 }
 
+/// Box-downsample RGBA to a smaller resolution. Used only for the CPU BC
+/// fallback on devices without hardware BC: keeping every 4096x4096 AC texture
+/// as RGBA8 made imola decode to ~3.7 GB and the OS jetsammed the app.
+fn downsample_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (dw * dh * 4) as usize];
+    for y in 0..dh {
+        let y0 = (y * sh / dh).min(sh - 1);
+        let y1 = ((y + 1) * sh / dh).min(sh - 1).max(y0 + 1);
+        for x in 0..dw {
+            let x0 = (x * sw / dw).min(sw - 1);
+            let x1 = ((x + 1) * sw / dw).min(sw - 1).max(x0 + 1);
+            let mut sum = [0u32; 4];
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    let at = ((py * sw + px) * 4) as usize;
+                    for c in 0..4 { sum[c] += src[at + c] as u32; }
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as u32;
+            let at = ((y * dw + x) * 4) as usize;
+            for c in 0..4 { out[at + c] = (sum[c] / n) as u8; }
+        }
+    }
+    out
+}
+
+/// Upper bound for a CPU-decoded fallback texture (1 MP = 4 MiB RGBA8, ~5.3 MiB
+/// with mips). Apple's per-process limit killed the app at ~3.1 GB.
+const BC_FALLBACK_MAX_PIXELS: u32 = 1024 * 1024;
+
+/// Target resolution for the CPU-decoded fallback (pure, so it is testable).
+fn bc_fallback_target(width: u32, height: u32) -> (u32, u32) {
+    if width.saturating_mul(height) <= BC_FALLBACK_MAX_PIXELS {
+        return (width.max(1), height.max(1));
+    }
+    let scale = (BC_FALLBACK_MAX_PIXELS as f64 / (width * height) as f64).sqrt();
+    (((width as f64 * scale) as u32).max(1), ((height as f64 * scale) as u32).max(1))
+}
+
 /// R8G8B8A8 with a full mip chain, each level the 2x2 box average of the one above.
 fn rgba_with_mips(kgl: &Kgl, width: u32, height: u32, rgba: Vec<u8>) -> Result<View, String> {
+    rgba_with_mips_format(kgl, width, height, rgba, DXGI_FORMAT_R8G8B8A8_UNORM)
+}
+
+fn rgba_with_mips_format(kgl: &Kgl, width: u32, height: u32, rgba: Vec<u8>,
+                         format: DXGI_FORMAT) -> Result<View, String> {
     let mut levels = vec![(rgba, width * 4)];
     let (mut w, mut h) = (width, height);
     while w > 1 || h > 1 {
@@ -98,7 +142,7 @@ fn rgba_with_mips(kgl: &Kgl, width: u32, height: u32, rgba: Vec<u8>) -> Result<V
         w = nw;
         h = nh;
     }
-    upload(kgl, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, &levels)
+    upload(kgl, width, height, format, &levels)
 }
 
 /// Decode a block-compressed DDS level to RGBA8 when the adapter has no
@@ -211,17 +255,23 @@ fn upload_decompressed_bc(kgl: &Kgl, format: DXGI_FORMAT, width: u32, height: u3
         return Err(format!("no CPU decoder for DXGI format {} (BC6/BC7)", format.0));
     }
     let srgb = matches!(format.0, 72 | 75 | 78);
-    let mut out = Vec::new();
-    let (mut w, mut h) = (width, height);
-    for (level, (data, _)) in levels.iter().enumerate() {
-        let _ = level;
-        let rgba = decode_bc(kind, w, h, data)?;
-        out.push((rgba, w * 4));
-        w = (w / 2).max(1);
-        h = (h / 2).max(1);
+    let (data, _) = &levels[0];
+    let rgba = decode_bc(kind, width, height, data)?;
+
+    // Keep a hard memory budget. Decode only level 0 and rebuild the mip chain
+    // after downscaling: a 4096x4096 AC texture as RGBA8 alone is 64 MiB and
+    // imola has 110 such textures — that is what hit the Jetsam limit.
+    let (tw, th) = bc_fallback_target(width, height);
+    if tw != width || th != height {
+        println!("BC texture fallback: downscaled {width}x{height} -> {tw}x{th} (iOS memory budget)");
     }
+    let rgba = if tw != width || th != height {
+        downsample_rgba(&rgba, width, height, tw, th)
+    } else {
+        rgba
+    };
     let target = if srgb { DXGI_FORMAT(29) } else { DXGI_FORMAT_R8G8B8A8_UNORM };
-    upload(kgl, width, height, target, &out)
+    rgba_with_mips_format(kgl, tw, th, rgba, target)
 }
 
 fn dds(kgl: &Kgl, bytes: &[u8]) -> Result<View, String> {
@@ -506,6 +556,26 @@ mod bc_decoder_tests {
     fn short_block_is_reported_not_silently_dropped() {
         assert!(decode_bc(1, 4, 4, &[0u8; 4]).is_err());
         assert!(decode_bc(3, 4, 4, &[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn ios_memory_budget_caps_huge_textures() {
+        assert_eq!(bc_fallback_target(512, 512), (512, 512));
+        assert_eq!(bc_fallback_target(4096, 4096), (1024, 1024));
+        for (w, h) in [(4096, 2048), (2048, 4096), (2048, 2048), (4096, 4096)] {
+            let (tw, th) = bc_fallback_target(w, h);
+            assert!(tw as u64 * th as u64 <= BC_FALLBACK_MAX_PIXELS as u64,
+                    "{w}x{h} -> {tw}x{th} exceeds the memory budget");
+        }
+    }
+
+    #[test]
+    fn downsample_averages_blocks_and_preserves_alpha() {
+        let mut src = vec![0u8; 4 * 4 * 4];
+        for p in src.chunks_exact_mut(4) { p.copy_from_slice(&[200, 100, 50, 255]); }
+        let small = downsample_rgba(&src, 4, 4, 2, 2);
+        assert_eq!(small.len(), 2 * 2 * 4);
+        for p in small.chunks_exact(4) { assert_eq!(p, &[200, 100, 50, 255]); }
     }
 }
 

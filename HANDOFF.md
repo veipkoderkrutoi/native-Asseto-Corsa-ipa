@@ -1,4 +1,4 @@
-# HANDOFF — Assetto Corsa iOS Port (Phase 9 Glow Up)
+# HANDOFF — Assetto Corsa iOS Port (Phase 10 Crash Forensics)
 
 ## ГДЕ ВСЁ НАХОДИТСЯ
 
@@ -81,6 +81,23 @@ AC-сцену, машина едет, телеметрия/камеры рабо
   `AC-iOS-Prot-unsigned-PrePhase9-WORKING-backup.ipa`.
 - **Новая IPA ещё не проверена на iPhone** — аудио/графику нужно слушать/смотреть
   после установки. В Settings→Diagnostics видны texture counters и audio status.
+
+## PHASE 10 — JETSAM FIX
+
+- Реальный вылет на iPhone (3 нажатия Drive, полный syslog):
+  `memorystatus: killing_specific_process pid … [ac-ios-port] (per-process-limit 100 5s)
+  3163044KB`, exit `domain:jetsam(1) code:per-process-limit(7)`. **Не panic, не SIGABRT, не wgpu, не аудио.**
+- Причина: Phase 9 CPU-декод BC → RGBA8 без ограничения памяти; imola ~3.68 GB
+  декодированных текстур при лимите ~3 GB.
+- Фикс: `texture_fallback.rs` — `BC_FALLBACK_MAX_PIXELS = 1024*1024`,
+  `bc_fallback_target()`, `downsample_rgba()`, `rgba_with_mips_format()`;
+  декод только level 0 + downscale + mip. Крупные текстуры displaying
+  в уменьшенном разрешении (честно залогировано). Регрессия: 44 теста,
+  42 PASS / 2 ignored; iOS cargo check PASS; verify 52/52; prepush PASS.
+- Отчёт `phase10/PHASE10_REPORT.md`, патч `patches/phase10/`, чекпоинты
+  `checkpoint/before_phase10/`, `after_phase10/`.
+- Raw syslog с PII в `phase10/crash_forensics/` — НЕ коммитить (audit исключает).
+- **REAL DEVICE DRIVE VALIDATION: NOT CONFIRMED** — нужно поставить новую IPA.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 
