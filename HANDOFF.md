@@ -5,7 +5,7 @@
 - Проект: `D:\opencode-sandbox\ac-ios-port`
 - GitHub: `veipkoderkrutoi/native-Asseto-Corsa-ipa`, ветка `main`
 - Рабочий стол: `C:\Users\User\Desktop\AC-iOS-content-pack`
-  - `AC-iOS-Prot-unsigned.ipa` — **сборка NEXT PHASE (новый UI)**, CI `44368896612` success, SHA-256 `21b58d2d4f53cd9cde6dfcf2924728d15838e09b8152c6bc27fb672b71b2e3ac`, 4,317,357 B, аудит PASS.
+  - `AC-iOS-Prot-unsigned.ipa` — **сборка Phase 9 Glow Up**, CI `44516784090` success, SHA-256 `1a1f017ea4013ce5e779bad3e8115f22d40e048d2b3cad699fc39f009ca61343`, 4,321,440 B, аудит PASS.
 - `AC-iOS-Prot-unsigned-Phase8.2-WORKING-backup.ipa` — предыдущая рабочая, SHA `6765c9c0…`. НЕ удалять, пока новый UI не подтверждён на iPhone.
   - `AC-iOS\` — папка контента (3 машины + 2 трассы, 927 МиБ)
 - Оригинальная игра: `D:\Games\assettocorsa` (AC 1.16.2)
@@ -77,8 +77,10 @@ AC-сцену, машина едет, телеметрия/камеры рабо
 - Тесты: 42 lib (40 pass, 2 ignored), iOS cargo check PASS, verify 52/52,
   prepush PASS. Отчёт `phase9/PHASE9_GLOWUP_REPORT.md`, патч
   `patches/phase9_glowup/`, чекпоинт `checkpoint/before_phase9/` и `after_phase9_glowup/`.
+- Новая IPA собрана (см. выше); предыдущая рабочая сохранена как
+  `AC-iOS-Prot-unsigned-PrePhase9-WORKING-backup.ipa`.
 - **Новая IPA ещё не проверена на iPhone** — аудио/графику нужно слушать/смотреть
-  после установки.
+  после установки. В Settings→Diagnostics видны texture counters и audio status.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 

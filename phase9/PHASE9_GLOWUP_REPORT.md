@@ -176,6 +176,17 @@ and checks the diagnostics panel.
 
 ## Build / artifacts
 
-- Commit, GitHub Actions run, IPA path, size and SHA-256: filled in after CI.
+- Commit: **`e401f33`** (pushed to `main`).
+- GitHub Actions run: **`44516784090`** — **SUCCESS** on `macos-26-intel`;
+  all steps green, including the Objective-C build with AVAudioEngine.
+- IPA: `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-Prot-unsigned.ipa`
+  - Size: **4,321,440 B**
+  - SHA-256: **`1a1f017ea4013ce5e779bad3e8115f22d40e048d2b3cad699fc39f009ca61343`**
+  - `scripts/audit_unsigned_ipa.py`: **UNSIGNED IPA STRUCTURALLY VALID**
+- Previous working build preserved as
+  `AC-iOS-Prot-unsigned-PrePhase9-WORKING-backup.ipa` (SHA `21b58d2d…`), and the
+  older Phase 8.2 build as `...-Phase8.2-WORKING-backup.ipa` (`6765c9c0…`).
 - Patch: `patches/phase9_glowup/`
-- Checkpoint before changes: `checkpoint/before_phase9/`
+- Checkpoint before changes: `checkpoint/before_phase9/`; after changes:
+  `checkpoint/after_phase9_glowup/`
+- CI log: `phase9/gha_phase9.log`
