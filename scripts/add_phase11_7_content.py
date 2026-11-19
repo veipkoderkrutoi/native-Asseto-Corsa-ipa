@@ -32,10 +32,12 @@ def main() -> int:
     cars = sorted(set(data.get("cars", [])) | set(CARS))
     tracks = sorted(set(data.get("tracks", [])) | set(TRACKS))
 
-    rels = sorted({p.replace("\\", "/") for c in cars for p in
-                   [str(x.relative_to(PACK)) for x in (PACK / "content/cars" / c).rglob("*") if x.is_file()]}
-                  | {p.replace("\\", "/") for t in tracks for p in
-                     [str(x.relative_to(PACK)) for x in (PACK / "content/tracks" / t).rglob("*") if x.is_file()]})
+    # Include EVERYTHING the renderer reads: content/ and system/ (cfg, data,
+    # shaders/win). The first Phase 11.7 manifest accidentally dropped system/
+    # files, which is why the iPhone could not find ksSky in system/shaders/win.
+    rels = sorted({p.relative_to(PACK).as_posix()
+                   for p in PACK.rglob("*")
+                   if p.is_file() and p.name != "manifest.json"})
     known = {f["path"]: f for f in data.get("files", [])}
     total = 0
     files = []

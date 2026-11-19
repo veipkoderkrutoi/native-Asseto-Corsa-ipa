@@ -53,6 +53,16 @@ def main() -> int:
     if PACK.exists():
         shutil.rmtree(PACK)
     total = 0
+    # rustyAC's ShaderManager loads <game>/system/shaders/win at renderer init
+    # (rustyac-render/src/shader.rs:263). The "files actually read" list from a
+    # given car/track set is not enough for newly added cars/tracks, so include
+    # the complete system/ tree (cfg, data, all shaders).
+    for system_file in sorted((ac / "system").rglob("*")):
+        if system_file.is_file():
+            rel = system_file.relative_to(ac).as_posix()
+            if rel not in files:
+                files.append(rel)
+    files = sorted(set(files))
     for rel in files:
         src = ac / rel
         if not src.is_file():

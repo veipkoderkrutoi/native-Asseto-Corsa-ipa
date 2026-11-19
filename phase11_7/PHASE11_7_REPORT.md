@@ -104,6 +104,23 @@ cargo tests (Phase 8–11): 42 + 9 PASS
 The popup, copied content and new cars/tracks have **not yet been exercised on
 the iPhone**. Real-device validation: **NOT CONFIRMED**.
 
+## Hotfix — missing `system/shaders/win` (ksSky)
+
+Real device error: `the shader kssky is not in .../Documents/AC-IOS/system/shaders/win`.
+Root cause: `rustyac-render/src/shader.rs:263` loads shaders from
+`<content root>/system/shaders/win`; the old importer copied only `content/cars`
+and `content/tracks`, and the Phase 11.7 manifest had accidentally dropped
+`system/` files when re-registering content.
+
+Fixed:
+- copied the complete `system/` tree from the user's install into the local pack
+  (216 shader files, `ksSky_*` present; total 886 system files in manifest);
+- `scripts/add_phase11_7_content.py` now indexes **all** pack files, including `system/`;
+- `ios/ACImportPopup.m` now validates `system/shaders/win`, copies the whole
+  `system/` folder with progress, and reports a clear error when it is missing;
+- `scripts/build_content_pack.py` always includes the full `system/` tree;
+- `docs/CONTENT_PACK_AGENT_INSTRUCTIONS.md` documents the requirement.
+
 ## Build / artifacts
 
 - Commit `179adc3` (feature), CI `44597749846` — **SUCCESS** on `macos-26-intel`.

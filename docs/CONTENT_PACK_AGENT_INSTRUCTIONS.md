@@ -57,6 +57,23 @@ Copy-Item $src $dst -Recurse -Force
 Для трассы — так же в `content_pack\content\tracks\<folder>` ( geom + `data/` +
 `ui/` + `map.png` + текстуры ). Не копируй только `.kn5`.
 
+## 3b. ОБЯЗАТЕЛЬНО: system/shaders/win
+
+`rustyac-render/src/shader.rs:263` загружает шейдеры из
+`<content root>/system/shaders/win`. Без `ksSky_*` реальный рендерер падает с
+`the shader kssky is not in .../system/shaders/win` ещё до первого кадра.
+
+Скопируй **полностью** `system/` из игры в `content_pack/system/`
+(cfg + data + shaders/win, ~23 MiB, 216 файлов). Проверка:
+
+```powershell
+Test-Path 'content_pack\system\shaders\win\ksSky_ps.fxo'   # must be True
+Test-Path 'content_pack\system\shaders\win\ksSky_vs.fxo'   # must be True
+```
+
+Импортер в приложении тоже копирует `system/` — но только если он есть в
+выбранной папке. Если интегратор собирает кастомный pack, не забудь `system/`.
+
 ## 4. Обновить manifest
 
 Локальный manifest должен отражать реальное содержимое. Используй

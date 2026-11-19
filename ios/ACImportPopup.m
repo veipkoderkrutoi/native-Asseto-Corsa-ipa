@@ -238,6 +238,20 @@ typedef NS_ENUM(NSInteger, ACImportState) {
     NSURL *srcTracks = [root.path hasSuffix:@"/content"]
         ? [root URLByAppendingPathComponent:@"tracks" isDirectory:YES]
         : [root URLByAppendingPathComponent:@"content/tracks" isDirectory:YES];
+    // rustyAC's ShaderManager loads <content root>/system/shaders/win (shader.rs:263).
+    // Without ksSky there the real renderer fails in AcRenderer::new. This was
+    // silently missing from the old importer, which copied only cars/tracks.
+    NSURL *srcSystem = [root.path hasSuffix:@"/content"]
+        ? [root URLByDeletingLastPathComponent]
+        : [root URLByAppendingPathComponent:@"system" isDirectory:YES];
+    NSURL *shaderDir = [srcSystem URLByAppendingPathComponent:@"shaders/win" isDirectory:YES];
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:shaderDir.path isDirectory:&isDir] || !isDir) {
+        [self failOnMain:@"The selected folder is missing system/shaders/win. "
+                          "Choose the full AC installation root or a complete Content Pack; "
+                          "the renderer needs those shaders (including ksSky) to start."];
+        return;
+    }
 
     NSArray<NSURL *> *cars = [self itemsIn:srcCars];
     NSArray<NSURL *> *tracks = [self itemsIn:srcTracks];
@@ -263,8 +277,10 @@ typedef NS_ENUM(NSInteger, ACImportState) {
     }
     [fm createDirectoryAtPath:destCars.path withIntermediateDirectories:YES attributes:nil error:nil];
     [fm createDirectoryAtPath:destTracks.path withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:[destRoot URLByAppendingPathComponent:@"system" isDirectory:YES].path
+ withIntermediateDirectories:YES attributes:nil error:nil];
 
-    NSUInteger total = 0;
+    NSUInteger total = [self fileCountIn:srcSystem];
     for (NSURL *u in cars) total += [self fileCountIn:u];
     for (NSURL *u in tracks) total += [self fileCountIn:u];
     if (total == 0) total = 1;
@@ -293,6 +309,11 @@ typedef NS_ENUM(NSInteger, ACImportState) {
             _progress.progress = (float)done / (float)total;
         });
     };
+    // system/ is small (cfg + shaders, ~23 MiB) and must be complete.
+    for (NSURL *child in [self itemsIn:srcSystem]) {
+        copyOne(child, [destRoot URLByAppendingPathComponent:
+                        [@"system" stringByAppendingPathComponent:child.lastPathComponent] isDirectory:YES]);
+    }
     for (NSURL *car in cars) copyOne(car, [destCars URLByAppendingPathComponent:car.lastPathComponent isDirectory:YES]);
     for (NSURL *track in tracks) copyOne(track, [destTracks URLByAppendingPathComponent:track.lastPathComponent isDirectory:YES]);
 
