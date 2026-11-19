@@ -106,10 +106,10 @@ the iPhone**. Real-device validation: **NOT CONFIRMED**.
 
 ## Build / artifacts
 
-- Commit `a609e93` (feature), CI `44569542332` — **SUCCESS** on `macos-26-intel`.
+- Commit `179adc3` (feature), CI `44597749846` — **SUCCESS** on `macos-26-intel`.
 - IPA: `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-Prot-unsigned.ipa`
-  - Size **4,358,287 B**, SHA-256
-    `472307943e670eadb61666f77334320c4f4fb110de5864fbbac0e945ac0ea928`
+  - Size **4,358,164 B**, SHA-256
+    `e7b16ae0b79c7f4bec87735ba59333f167d2ba9a2d28deb376541783181534f0`
   - audit: `UNSIGNED IPA STRUCTURALLY VALID`
 - Previous Phase 11 build preserved as
   `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa` (`d34ca0cf…`).

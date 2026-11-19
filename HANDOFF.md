@@ -142,7 +142,7 @@ AC-сцену, машина едет, телеметрия/камеры рабо
 - Реальный `full_frame` load: 6/6 OK (5 новых машин @ magione + lotus @ trento).
 - Garage показывает РЕАЛЬНЫЕ имена из ui_car.json и превью из пользовательского
   контента (84×48, кэш), без загрузки KN5 ради карточек.
-- IPA: CI `44569542332` success, SHA `472307943e…`, 4,358,287 B; старая IPA
+- IPA: CI `44597749846` success, SHA `472307943e…`, 4,358,164 B; старая IPA
   сохранена как `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa`.
 - **REAL DEVICE VALIDATION: NOT CONFIRMED** — popup/импорт/новый контент нужно
   проверить на iPhone.
