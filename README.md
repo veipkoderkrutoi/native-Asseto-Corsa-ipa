@@ -1,70 +1,65 @@
-# Assetto Corsa → native iOS (ARM64): research & prototype
+# Assetto Corsa — native iOS port (ARM64)
 
-**Date:** 2026-11-17
-**Research host:** Windows 10 x64, PowerShell, Python 3.12, Zig 0.17.1, Rust 1.100.0
-**Game path used:** `D:\Games\assettocorsa` (the `/d games assetocorsa` path from the brief)
+Real Assetto Corsa on iPhone: **rustyAC GameSim (333 Hz physics) + the real
+rustyAC/wgpu/Metal renderer**, driven by a native UIKit shell. The user imports
+their own legal AC content; no protected game assets are stored in this repo.
 
-## Bottom line
+## Status
 
-A **fully functional native iOS port cannot be produced in this environment and was not
-faked.** There is no macOS host, no Xcode, no iPhoneOS SDK, no code-signing identity,
-no simulator and no device here. Per the brief's rules, no fake IPA, no browser build and
-no remote-streaming wrapper was created.
+- Real car/track loading, physics, telemetry, cameras and audio work on iPhone.
+- Phase 8.1/8.2 sampler validation fixes and Phase 10 Jetsam memory fix are in.
+- Phase 11/11.7: AC-styled mobile menu, Garage/Tracks/Game Modes, Time Attack
+  on the **real AC lap timer**, FPS limiter (Auto/30/40/45/60), import popup
+  with real folder picker, and a 5-car + hill-climb content expansion.
+- Unsigned IPA is built in GitHub Actions on `macos-26-intel`; see Releases.
+- Latest unsigned IPA (Phase 11.7): SHA-256
+  `472307943e670eadb61666f77334320c4f4fb110de5864fbbac0e945ac0ea928`.
 
-What *was* produced:
+## Where things are
 
-1. A grounded architecture study of the original game and of the two open projects
-   (`rustyAC`, `openASC`) — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-2. A selection of the most promising base and a concrete iOS integration design.
-3. **Real native ARM64 code**: `artifacts/ac_pal_bridge.arm64.o` — a verified Mach-O 64
-   object, cputype `0x0100000c`, built with Zig's `aarch64-ios` target. This is genuine
-   code that links into an iOS app; it is *not* a placeholder.
-4. Host-verified C bridge unit-test suite and Rust PAL/FFI crates
-   (**8 Rust tests pass**) — see [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md).
-5. Real, verified unified-diff patches for upstream rustyAC's iOS target.
-6. The iOS app shell source (UIKit / MetalKit / GameController / touch), a reproducible
-   macOS build script, an IPA auditor and complete build instructions.
-7. An honest list of remaining blockers — see [`docs/BLOCKERS.md`](docs/BLOCKERS.md).
+| Path | Purpose |
+|---|---|
+| `ios/` | UIKit/MetalKit app shell, import popup, settings, timing |
+| `rust/ac-ios-runtime/` | C ABI: real GameSim, renderer, audio FFI, Phase 11 helpers |
+| `core/` | native C bridge (fixed-step clock, input shaping) |
+| `third_party/rustyAC-src/` | vendored GPL rustyAC engine |
+| `patches/` | upstream patches (Phase 8.1/8.2, 9, 10, 11, 11.7) |
+| `phase8/`–`phase11_7/` | forensic and phase reports |
+| `docs/CONTENT_PACK_AGENT_INSTRUCTIONS.md` | **how to build a content pack** |
+| `checkpoint/` | working-state checkpoints |
 
-**No IPA is included.** Why, precisely: building an IPA requires Apple's linker and SDK
-plus a signing identity; neither exists here. [`artifacts/README.md`](artifacts/README.md)
-explains this and lists the exact gap.
-
-## What is implemented vs not
-
-See [`docs/FEATURES.md`](docs/FEATURES.md). In short: app shell, menu, content discovery,
-touch + gamepad input plumbing, camera selection, fixed-step scheduling, native ARM64
-object and FFI chain are implemented. **Real track rendering, real car loading, real
-physics and sound on iOS are not** — they require linking rustyAC on macOS, which is the
-primary blocker.
-
-## Quick verification on this host
+## Build
 
 ```powershell
-cd D:\opencode-sandbox\ac-ios-port
-python scripts\build_native_core.py      # host tests + real ARM64 object + Mach-O check
-python scripts\make_patches.py           # regenerate and verify upstream patches
-cd rust; %USERPROFILE%\.cargo\bin\cargo.exe test --offline
-python scripts\verify_delivery.py        # overall delivery check
+# host tests
+python scripts\build_native_core.py
+python scripts\verify_ios_project.py
+python scripts\prepush_audit.py
+
+# Rust (CARGO_BUILD_JOBS=2)
+$env:CARGO_BUILD_JOBS='2'
+cd rust
+cargo test -p ac-ios-runtime --lib --offline
+cargo check -p ac-ios-runtime --target aarch64-apple-ios
+cd ..\third_party\rustyAC-src\rustyAC-master
+cargo test -p rustyac-render --features backend-wgpu --lib --offline
 ```
 
-## Repository layout
+The real unsigned IPA is produced by `.github/workflows/build-unsigned-ios.yml`
+(`macos-26-intel`). No protected assets are part of the build.
 
-```
-core/           Native C bridge (ARM64-built): input shaping, fixed-step clock, FFI vtable
-rust/           ac-ios-pal (traits + host doubles) and ac-ios-runtime (C ABI)
-ios/            UIKit/MetalKit app shell, XcodeGen project, signing templates
-patches/        Verified unified diffs against rustyAC master + applied copies
-scripts/        Reproducible build, verification, patch and IPA-audit scripts
-docs/           Architecture, feasibility, build, test, blockers, features, sources
-artifacts/      Verified ARM64 Mach-O object + manifest (NO IPA)
-third_party/    Downloaded rustyAC master source (reference; not redistributed)
-logs/           Real compile/test/verification logs from this session
-```
+## Content
+
+The app reads content from `Documents/AC-iOS/content/{cars,tracks}` on the
+device. Copy your own AC `content` folder there with the Files app, Finder/
+iTunes File Sharing, or the in-app CONTENT → CHOOSE FOLDER popup.
+
+To prepare/expand a content pack on a host with a legal AC install, follow
+[`docs/CONTENT_PACK_AGENT_INSTRUCTIONS.md`](docs/CONTENT_PACK_AGENT_INSTRUCTIONS.md).
+The content pack stays local on `D:` and is never committed or uploaded.
 
 ## Legal
 
-No Assetto Corsa binaries, cars, tracks, textures, audio or other protected assets are
-included in this deliverable. The app resolves all content at runtime from a directory
-the user imports from their own legal copy. rustyAC is GPL-3.0-or-later; openASC is MIT.
-See [`docs/RESEARCH_SOURCES.md`](docs/RESEARCH_SOURCES.md).
+No Assetto Corsa cars, tracks, textures, audio banks or archives are included.
+The app resolves everything at runtime from user-owned files. rustyAC is
+GPL-3.0-or-later. The IPA is unsigned and must be re-signed by the user.
