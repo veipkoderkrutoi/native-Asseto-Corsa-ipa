@@ -64,4 +64,13 @@ See `phase11/TIME_ATTACK_REPORT.md` and `phase11/PERFORMANCE_REPORT.md`.
 - Patch: `patches/phase11/`
 - Checkpoints: `checkpoint/phase11_1/` … `checkpoint/phase11_4/`,
   final `checkpoint/after_phase11/`
-- Commit / CI / IPA: filled in after CI.
+- Commits: `4f0d014` (feature), `f9c6d07` (iOS build fix: `task_vm_info`).
+- CI: first run `44559178623` failed at Xcode build with one error —
+  `ios_bridge.m:296: no member named 'phys_footprint' in mach_task_basic_info`.
+  Fixed by using public `task_vm_info` (already used by Rust meminfo).
+  Retry `44560868971` — **SUCCESS** on `macos-26-intel`, IPA audit PASS.
+- IPA: `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-Prot-unsigned.ipa`
+  - Size **4,346,470 B**, SHA-256
+    `d34ca0cf78b7dc6fbc91c9e8a192a42b58ee9bd0d21815ac9b2244ad1a92f7b3`
+- Previous Phase 10 IPA preserved as `AC-iOS-Prot-unsigned-PrePhase11-WORKING-backup.ipa`.
+- Real-device verification of this build: **NOT CONFIRMED**.

@@ -115,7 +115,10 @@ AC-сцену, машина едет, телеметрия/камеры рабо
 - Новые файлы: `ios/ACSettings.{h,m}`, `ios/ACTiming.{h,m}`, `rust/.../phase11.rs`.
 - Тесты: rustyac-render 42 PASS, ac-ios-runtime 9 PASS, iOS check PASS, verify 52/52,
   prepush PASS. REPORTs: `phase11/*.md`. Патч `patches/phase11/`.
-- **Не проверено на iPhone после Phase 11** — нужно новая IPA.
+- IPA Phase 11 готова: CI `44560868971` success, SHA `d34ca0cf…`, 4,346,470 B.
+  BUILD FIX: `phys_footprint` взят из `task_vm_info` (не `mach_task_basic_info`).
+- **REAL DEVICE VALIDATION: NOT CONFIRMED** — нужна установка IPA и проверка
+  меню/Time Attack/FPS cap/звука. Старая IPA сохранена как PrePhase11 backup.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 
