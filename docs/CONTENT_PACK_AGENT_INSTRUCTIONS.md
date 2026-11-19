@@ -74,6 +74,15 @@ Test-Path 'content_pack\system\shaders\win\ksSky_vs.fxo'   # must be True
 Импортер в приложении тоже копирует `system/` — но только если он есть в
 выбранной папке. Если интегратор собирает кастомный pack, не забудь `system/`.
 
+### Hotfix для уже импортированного контента
+
+Если на устройстве уже есть `Documents/AC-iOS/content` и нет необходимости переливать
+весь пак, достаточно 작은 патча `system-fix.zip` (~0.95 MiB): он содержит
+только `system/cfg`, `system/data` и `system/shaders/win` (включая `ksSky`).
+Распаковать на iPhone и скопировать папку `system` в
+`Documents/AC-iOS/system` рядом с существующей `content`. Существующие
+машины/трассы не трогать.
+
 ## 4. Обновить manifest
 
 Локальный manifest должен отражать реальное содержимое. Используй
