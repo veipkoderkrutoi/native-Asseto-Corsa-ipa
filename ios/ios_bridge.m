@@ -8,6 +8,10 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <UIKit/UIKit.h>
+#import <mach/mach.h>
+
+/* Exported by the Rust staticlib (ac-ios-runtime). */
+extern void ac_ios_core_lap_state(void *session, ACIosLapState *out);
 
 static NSString *gContentRoot = @"";
 static ACIosInputState gInput = {0};
@@ -272,6 +276,24 @@ void ac_ios_audio_resume(void) {
 
 void *ac_ios_metal_layer(void) {
     return (__bridge void *)gMetalLayer;
+}
+
+int ac_ios_lap_state(ACIosLapState *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    void *session = ac_pal_bridge_session();
+    if (!session) return -1;
+    ac_ios_core_lap_state(session, out);
+    return 0;
+}
+
+uint64_t ac_ios_memory_footprint(void) {
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return (uint64_t)info.phys_footprint;
 }
 
 int ac_ios_install_core_vtable(void) {

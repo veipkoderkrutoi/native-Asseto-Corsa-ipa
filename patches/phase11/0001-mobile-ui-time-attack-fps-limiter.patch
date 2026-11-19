@@ -1,0 +1,1913 @@
+﻿diff --git a/ios/GameViewController.m b/ios/GameViewController.m
+index f95e489..724b4f4 100644
+--- a/ios/GameViewController.m
++++ b/ios/GameViewController.m
+@@ -1,42 +1,75 @@
+ //
+ //  GameViewController.m тАФ UIKit/MetalKit host for the real rustyAC engine.
+-//  Requires macOS + Xcode + iOS SDK. NOT compiled on the research host.
+-//
+-//  Scope: UIKit/MetalKit host for the real AC scene. The game-facing layer is
+-//  a mobile UI: virtual wheel + analog pedals, compact menu and a clean HUD.
+-//  All telemetry comes from the live GameSim; no invented values or scenes.
++//  Phase 11: Assetto Corsa inspired mobile shell (menu, garage, tracks,
++//  game modes, settings), Time Attack on the real AC lap timer, FPS limiter.
++//  The renderer, physics, content import and audio subsystems are unchanged.
+ //
+ 
+ #import "GameViewController.h"
+ #import "AppDelegate.h"
+ #import "ios_bridge.h"
+ #import "ac_pal_bridge.h"
++#import "ACSettings.h"
++#import "ACTiming.h"
+ #import <math.h>
+ #import <QuartzCore/QuartzCore.h>
+ 
+ #import <MetalKit/MetalKit.h>
+ #import <GameController/GameController.h>
+ 
+-#pragma mark - Small UI pieces
++#pragma mark - styled controls
+ 
+-/// The wheel face. Drawn once, then only rotated by the control (no per-frame
+-/// GPU work, no allocation in the render loop).
+-@interface ACWheelRotor : UIView
++@interface ACButton : UIButton
++- (instancetype)initWithTitle:(NSString *)title accent:(BOOL)accent;
++@end
++
++@implementation ACButton
++- (instancetype)initWithTitle:(NSString *)title accent:(BOOL)accent {
++    self = [super initWithFrame:CGRectZero];
++    if (self) {
++        [self setTitle:title forState:UIControlStateNormal];
++        self.titleLabel.font = [UIFont boldSystemFontOfSize:14.0];
++        [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
++        [self setTitleColor:[UIColor colorWithWhite:0.6 alpha:1.0] forState:UIControlStateHighlighted];
++        [self setTitleColor:[UIColor colorWithWhite:0.45 alpha:1.0] forState:UIControlStateDisabled];
++        self.backgroundColor = accent
++            ? [UIColor colorWithRed:0.78 green:0.10 blue:0.10 alpha:0.95]
++            : [UIColor colorWithWhite:0.13 alpha:0.94];
++        self.layer.cornerRadius = 4.0;
++        self.layer.borderWidth = 1.0;
++        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.13].CGColor;
++    }
++    return self;
++}
+ @end
+ 
++@interface ACPanel : UIView
++@end
++@implementation ACPanel
++- (instancetype)initWithFrame:(CGRect)frame {
++    self = [super initWithFrame:frame];
++    if (self) {
++        self.backgroundColor = [UIColor colorWithWhite:0.075 alpha:0.94];
++        self.layer.cornerRadius = 6.0;
++        self.layer.borderWidth = 1.0;
++        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
++    }
++    return self;
++}
++@end
++
++/// Steering wheel face; drawn once and only rotated by the control.
++@interface ACWheelRotor : UIView
++@end
+ @implementation ACWheelRotor
+ - (void)drawRect:(CGRect)rect {
+     CGRect r = CGRectInset(self.bounds, 8.0, 8.0);
+     CGPoint c = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
+     CGFloat radius = MIN(r.size.width, r.size.height) * 0.5;
+-
+     CGContextRef ctx = UIGraphicsGetCurrentContext();
+     CGContextSetLineWidth(ctx, 9.0);
+     [[UIColor colorWithWhite:0.92 alpha:0.95] setStroke];
+-    CGContextAddEllipseInRect(ctx, r);
+     CGContextStrokeEllipseInRect(ctx, r);
+-
+-    // Three spokes make the rotation readable at a glance.
+     CGContextSetLineWidth(ctx, 7.0);
+     [[UIColor colorWithWhite:0.80 alpha:0.92] setStroke];
+     for (int i = 0; i < 3; i++) {
+@@ -46,263 +79,216 @@
+                                 c.y + sinf(a) * radius * 0.86);
+     }
+     CGContextStrokePath(ctx);
+-
+-    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.16 alpha:1.0].CGColor);
+-    CGContextAddEllipseInRect(ctx, CGRectMake(c.x - radius * 0.22, c.y - radius * 0.22,
+-                                              radius * 0.44, radius * 0.44));
++    [[UIColor colorWithWhite:0.16 alpha:1.0] setFill];
+     CGContextFillEllipseInRect(ctx, CGRectMake(c.x - radius * 0.22, c.y - radius * 0.22,
+-                                              radius * 0.44, radius * 0.44));
++                                               radius * 0.44, radius * 0.44));
+ }
+ @end
+ 
+-/// Analogue steering wheel. Relative drag from the touch-down point; lifting
+-/// the finger returns to neutral. value is -1 (left) .. +1 (right), which is
+-/// exactly rustyAC's CarControls convention (rustyac-physics/car/feed.rs:43:
+-/// "steer, -1..1, positive = right").
++/// Relative-drag analogue wheel. Value -1 (left) .. +1 (right), matching
++/// rustyAC's CarControls convention (rustyac-physics/car/feed.rs:43).
+ @interface ACWheelControl : UIView
+ @property (nonatomic, assign) float value;
+-@property (nonatomic, copy) void (^valueChanged)(float value);
++@property (nonatomic, assign) float sensitivity;
++@property (nonatomic, assign) float deadzone;
++@property (nonatomic, assign) BOOL autoCentre;
+ - (void)setToNeutral;
+ @end
+-
+ @implementation ACWheelControl {
+     ACWheelRotor *_rotor;
+     UITouch *_trackingTouch;
+     CGPoint _startPoint;
+     float _startValue;
+ }
+-
+ - (instancetype)initWithFrame:(CGRect)frame {
+     self = [super initWithFrame:frame];
+     if (self) {
+         self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.34];
+         self.layer.cornerRadius = MIN(frame.size.width, frame.size.height) * 0.5;
+         self.layer.borderWidth = 1.5;
+-        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.28].CGColor;
++        self.layer.borderColor = [UIColor colorWithRed:0.78 green:0.10 blue:0.10 alpha:0.6].CGColor;
+         self.multipleTouchEnabled = NO;
+-
+-        _rotor = [[ACWheelRotor alloc] initWithFrame:CGRectInset(self.bounds, 6.0, 6.0)];
++        _sensitivity = 1.0f; _deadzone = 0.02f; _autoCentre = YES;
++        _rotor = [[ACWheelRotor alloc] initWithFrame:CGRectInset(self.bounds, 6, 6)];
+         _rotor.backgroundColor = UIColor.clearColor;
+-        _rotor.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+         [self addSubview:_rotor];
+-
+-        UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, frame.size.height - 20.0,
+-                                                                  frame.size.width, 14.0)];
+-        hint.text = @"STEER";
+-        hint.textAlignment = NSTextAlignmentCenter;
+-        hint.font = [UIFont boldSystemFontOfSize:10.0];
++        UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, frame.size.height - 20, frame.size.width, 14)];
++        hint.text = @"STEER"; hint.textAlignment = NSTextAlignmentCenter;
++        hint.font = [UIFont boldSystemFontOfSize:10];
+         hint.textColor = [UIColor colorWithWhite:0.85 alpha:0.8];
+-        hint.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleWidth;
+         [self addSubview:hint];
+     }
+     return self;
+ }
+-
+-- (void)layoutSubviews {
+-    [super layoutSubviews];
+-    _rotor.frame = CGRectInset(self.bounds, 6.0, 6.0);
+-}
+-
++- (void)layoutSubviews { [super layoutSubviews]; _rotor.frame = CGRectInset(self.bounds, 6, 6); }
+ - (void)setValue:(float)value {
+-    if (isnan(value)) value = 0.0f;
+-    value = MAX(-1.0f, MIN(1.0f, value));
++    if (isnan(value)) value = 0;
++    value = MAX(-1, MIN(1, value));
++    if (fabsf(value) < _deadzone) value = 0;
+     if (_value == value) return;
+     _value = value;
+-    // ~150 degrees of visible wheel rotation at full lock.
+     _rotor.transform = CGAffineTransformMakeRotation(value * 2.6f);
+-    if (self.valueChanged) self.valueChanged(value);
+ }
+-
+-- (void)setToNeutral {
+-    _trackingTouch = nil;
+-    [self setValue:0.0f];
+-}
+-
++- (void)setToNeutral { _trackingTouch = nil; [self setValue:0]; }
+ - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+     if (_trackingTouch) return;
+-    UITouch *touch = [touches anyObject];
+-    if (!touch) return;
+-    _trackingTouch = touch;
+-    _startPoint = [touch locationInView:self];
++    UITouch *t = [touches anyObject];
++    if (!t) return;
++    _trackingTouch = t;
++    _startPoint = [t locationInView:self];
+     _startValue = self.value;
+ }
+-
+ - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+-    for (UITouch *touch in touches) {
+-        if (touch != _trackingTouch) continue;
+-        CGPoint p = [touch locationInView:self];
+-        CGFloat span = MAX(60.0, self.bounds.size.width * 0.62);
++    for (UITouch *t in touches) {
++        if (t != _trackingTouch) continue;
++        CGPoint p = [t locationInView:self];
++        CGFloat span = MAX(60, self.bounds.size.width * 0.62 / MAX(0.5f, _sensitivity));
+         [self setValue:_startValue + (float)((p.x - _startPoint.x) / span)];
+         return;
+     }
+ }
+-
+ - (void)finishTouch:(NSSet<UITouch *> *)touches {
+-    for (UITouch *touch in touches) {
+-        if (touch == _trackingTouch) {
+-            [self setToNeutral];
++    for (UITouch *t in touches) {
++        if (t == _trackingTouch) {
++            _trackingTouch = nil;
++            if (_autoCentre) [self setValue:0];
+             return;
+         }
+     }
+ }
+-
+ - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self finishTouch:touches]; }
+-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self finishTouch:touches]; }
++- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self setToNeutral]; }
+ @end
+ 
+-/// Analogue pedal. The value is the vertical position of the finger inside
+-/// the pedal (top = 1, bottom = 0). Every release path zeroes it.
++/// Large analogue pedal with a visible fill and guaranteed zero on release.
+ @interface ACPedalControl : UIView
+ @property (nonatomic, assign) float value;
+-@property (nonatomic, copy) void (^valueChanged)(float value);
+ - (instancetype)initWithFrame:(CGRect)frame title:(NSString *)title color:(UIColor *)color;
+ - (void)setToNeutral;
+ @end
+-
+ @implementation ACPedalControl {
+     UIView *_fill;
+     UILabel *_title;
+ }
+-
+ - (instancetype)initWithFrame:(CGRect)frame title:(NSString *)title color:(UIColor *)color {
+     self = [super initWithFrame:frame];
+     if (self) {
+         self.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.42];
+-        self.layer.cornerRadius = 12.0;
++        self.layer.cornerRadius = 8.0;
+         self.layer.borderWidth = 1.5;
+         self.layer.borderColor = [color colorWithAlphaComponent:0.85].CGColor;
+         self.multipleTouchEnabled = YES;
+-
+-        _fill = [[UIView alloc] initWithFrame:CGRectMake(2, frame.size.height, frame.size.width - 4, 0)];
++        _fill = [[UIView alloc] initWithFrame:CGRectZero];
+         _fill.backgroundColor = [color colorWithAlphaComponent:0.55];
+-        _fill.layer.cornerRadius = 10.0;
+-        _fill.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
++        _fill.layer.cornerRadius = 6.0;
+         [self addSubview:_fill];
+-
+-        _title = [[UILabel alloc] initWithFrame:CGRectMake(0, frame.size.height - 26.0,
+-                                                            frame.size.width, 20.0)];
+-        _title.text = title;
+-        _title.textAlignment = NSTextAlignmentCenter;
+-        _title.font = [UIFont boldSystemFontOfSize:12.0];
++        _title = [[UILabel alloc] initWithFrame:CGRectZero];
++        _title.text = title; _title.textAlignment = NSTextAlignmentCenter;
++        _title.font = [UIFont boldSystemFontOfSize:12];
+         _title.textColor = UIColor.whiteColor;
+-        _title.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleWidth;
+         [self addSubview:_title];
+     }
+     return self;
+ }
+-
+ - (void)layoutSubviews {
+     [super layoutSubviews];
+     CGFloat h = self.bounds.size.height;
+-    _fill.frame = CGRectMake(2, h * (1.0 - self.value), self.bounds.size.width - 4, h * self.value);
+-    _title.frame = CGRectMake(0, h - 26.0, self.bounds.size.width, 20.0);
++    _fill.frame = CGRectMake(2, h * (1 - self.value), self.bounds.size.width - 4, h * self.value);
++    _title.frame = CGRectMake(0, h - 26, self.bounds.size.width, 20);
+ }
+-
+ - (void)setValue:(float)value {
+-    if (isnan(value)) value = 0.0f;
+-    value = MAX(0.0f, MIN(1.0f, value));
++    if (isnan(value)) value = 0;
++    value = MAX(0, MIN(1, value));
+     if (_value == value) return;
+     _value = value;
+     [self layoutSubviews];
+-    if (self.valueChanged) self.valueChanged(value);
+ }
+-
+-- (void)setToNeutral { [self setValue:0.0f]; }
+-
++- (void)setToNeutral { [self setValue:0]; }
+ - (void)updateFromEvent:(UIEvent *)event {
+-    float best = 0.0f;
+-    for (UITouch *touch in event.allTouches) {
+-        if (touch.view != self) continue;
+-        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) continue;
+-        CGPoint p = [touch locationInView:self];
+-        float v = (float)((CGRectGetMaxY(self.bounds) - p.y) / MAX(1.0, self.bounds.size.height));
+-        best = MAX(best, v);
++    float best = 0;
++    for (UITouch *t in event.allTouches) {
++        if (t.view != self || t.phase == UITouchPhaseEnded || t.phase == UITouchPhaseCancelled) continue;
++        CGPoint p = [t locationInView:self];
++        best = MAX(best, (float)((CGRectGetMaxY(self.bounds) - p.y) / MAX(1, self.bounds.size.height)));
+     }
+     [self setValue:best];
+ }
+-
+ - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateFromEvent:event]; }
+ - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateFromEvent:event]; }
+ - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self updateFromEvent:event]; }
+ - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self setToNeutral]; }
+ @end
+ 
+-@interface ACRoundButton : UIButton
+-- (instancetype)initWithTitle:(NSString *)title accent:(BOOL)accent;
+-@end
+-
+-@implementation ACRoundButton
+-- (instancetype)initWithTitle:(NSString *)title accent:(BOOL)accent {
+-    self = [super initWithFrame:CGRectZero];
+-    if (self) {
+-        [self setTitle:title forState:UIControlStateNormal];
+-        self.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+-        [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+-        [self setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.45] forState:UIControlStateHighlighted];
+-        self.backgroundColor = accent
+-            ? [[UIColor colorWithRed:0.85 green:0.30 blue:0.12 alpha:1.0] colorWithAlphaComponent:0.92]
+-            : [[UIColor colorWithWhite:0.16 alpha:1.0] colorWithAlphaComponent:0.86];
+-        self.layer.cornerRadius = 9.0;
+-        self.layer.borderWidth = 1.0;
+-        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+-    }
+-    return self;
+-}
+-@end
+-
+ #pragma mark - View controller
+ 
+ @interface GameViewController () <MTKViewDelegate, UITableViewDataSource, UITableViewDelegate>
+ @property (nonatomic, strong) MTKView *metalView;
++@property (nonatomic, strong) ACSettings *settings;
++@property (nonatomic, strong) ACTiming *timing;
++
++// Screens
++@property (nonatomic, strong) UIView *menuContainer;
++@property (nonatomic, strong) UIView *homeView;
++@property (nonatomic, strong) UIView *garageView;
++@property (nonatomic, strong) UIView *tracksView;
++@property (nonatomic, strong) UIView *modesView;
++@property (nonatomic, strong) UIView *settingsView;
++@property (nonatomic, strong) UIScrollView *settingsScroll;
++@property (nonatomic, strong) UITableView *carsTable;
++@property (nonatomic, strong) UITableView *tracksTable;
++@property (nonatomic, strong) UITableView *modesTable;
++@property (nonatomic, strong) NSArray<NSString *> *cars;
++@property (nonatomic, strong) NSArray<NSString *> *tracks;
+ 
+-// Menu
+-@property (nonatomic, strong) UIView *menuPanel;
+-@property (nonatomic, strong) UITableView *menuTable;
+-@property (nonatomic, strong) UILabel *menuInfo;
+-@property (nonatomic, strong) UIButton *debugToggleButton;
+-@property (nonatomic, strong) UIButton *centerToggleButton;
++// Home
++@property (nonatomic, strong) UILabel *homeCar;
++@property (nonatomic, strong) UILabel *homeTrack;
++@property (nonatomic, strong) UILabel *homeBest;
++@property (nonatomic, strong) UILabel *homeMode;
++@property (nonatomic, strong) ACButton *driveButton;
++
++// Settings controls
++@property (nonatomic, strong) ACButton *fpsButton;
++@property (nonatomic, strong) ACButton *gameModeButton;
++@property (nonatomic, strong) ACButton *unitsButton;
++@property (nonatomic, strong) ACButton *hudButton;
++@property (nonatomic, strong) ACButton *diagButton;
++@property (nonatomic, strong) ACButton *autoShiftButton;
++@property (nonatomic, strong) ACButton *pedalLayoutButton;
++@property (nonatomic, strong) ACButton *muteButton;
+ @property (nonatomic, strong) UISlider *masterSlider;
+ @property (nonatomic, strong) UISlider *engineSlider;
+ @property (nonatomic, strong) UISlider *effectsSlider;
+-@property (nonatomic, strong) ACRoundButton *muteButton;
+-@property (nonatomic, strong) UILabel *audioInfoLabel;
+-@property (nonatomic, assign) BOOL audioMuted;
+-@property (nonatomic, assign) BOOL showCarsInMenu;
+-@property (nonatomic, assign) BOOL debugEnabled;
+-@property (nonatomic, assign) BOOL returnToCenter;
+-
+-// Driving controls
++@property (nonatomic, strong) UISlider *sensitivitySlider;
++@property (nonatomic, strong) UISlider *deadzoneSlider;
++@property (nonatomic, strong) UISlider *buttonScaleSlider;
++
++// Driving UI
+ @property (nonatomic, strong) ACWheelControl *wheel;
+ @property (nonatomic, strong) ACPedalControl *gasPedal;
+ @property (nonatomic, strong) ACPedalControl *brakePedal;
+-@property (nonatomic, strong) ACRoundButton *gearUpButton;
+-@property (nonatomic, strong) ACRoundButton *gearDownButton;
+-@property (nonatomic, strong) ACRoundButton *handbrakeButton;
+-@property (nonatomic, strong) ACRoundButton *cameraButton;
+-@property (nonatomic, strong) ACRoundButton *menuButton;
+-@property (nonatomic, strong) ACRoundButton *gearboxButton;
+-@property (nonatomic, strong) ACRoundButton *folderButton;
+-@property (nonatomic, strong) ACRoundButton *driveButton;
+-@property (nonatomic, strong) ACRoundButton *controlsButton;
+-@property (nonatomic, strong) ACRoundButton *settingsButton;
+-
+-// HUD / diagnostics
++@property (nonatomic, strong) ACButton *gearUpButton;
++@property (nonatomic, strong) ACButton *gearDownButton;
++@property (nonatomic, strong) ACButton *handbrakeButton;
++@property (nonatomic, strong) ACButton *cameraButton;
++@property (nonatomic, strong) ACButton *menuButton;
++@property (nonatomic, strong) ACButton *gearboxButton;
+ @property (nonatomic, strong) UIView *hudPanel;
+ @property (nonatomic, strong) UILabel *hudSpeed;
+ @property (nonatomic, strong) UILabel *hudRpm;
+ @property (nonatomic, strong) UILabel *hudGear;
++@property (nonatomic, strong) UIView *timingPanel;
++@property (nonatomic, strong) UILabel *timingCurrent;
++@property (nonatomic, strong) UILabel *timingBest;
++@property (nonatomic, strong) UILabel *timingLast;
++@property (nonatomic, strong) UILabel *timingLaps;
+ @property (nonatomic, strong) UILabel *debugLabel;
+ @property (nonatomic, strong) UILabel *messageLabel;
+ 
+-// Session / content
+-@property (nonatomic, strong) NSArray<NSString *> *cars;
+-@property (nonatomic, strong) NSArray<NSString *> *tracks;
+-@property (nonatomic, copy) NSString *selectedCar;
+-@property (nonatomic, copy) NSString *selectedTrack;
++// Session state
+ @property (nonatomic, assign) BOOL sessionOpen;
+ @property (nonatomic, assign) BOOL renderReady;
+-
+-// Input state
++@property (nonatomic, assign) BOOL driving;
+ @property (nonatomic, assign) BOOL touchHandbrake;
+ @property (nonatomic, assign) BOOL gearUpPending;
+ @property (nonatomic, assign) BOOL gearDownPending;
+@@ -310,12 +296,11 @@
+ @property (nonatomic, assign) BOOL lastGamepadGearUp;
+ @property (nonatomic, assign) BOOL lastGamepadGearDown;
+ @property (nonatomic, assign) BOOL lastGamepadCamera;
+-@property (nonatomic, assign) BOOL autoShifter;
+-
+-// Timing
+ @property (nonatomic, assign) NSUInteger telemetryFrame;
+ @property (nonatomic, assign) CFAbsoluteTime lastFrameTime;
+ @property (nonatomic, assign) float smoothedFps;
++@property (nonatomic, assign) double lastPhysicsMs;
++@property (nonatomic, assign) NSInteger thermalState;
+ @property (nonatomic, assign) unsigned long long metalFeatures;
+ @end
+ 
+@@ -323,15 +308,16 @@
+ 
+ - (void)viewDidLoad {
+     [super viewDidLoad];
+-    self.view.backgroundColor = UIColor.blackColor;
+-    self.returnToCenter = YES;
+-    self.debugEnabled = NO;
++    self.view.backgroundColor = [UIColor colorWithWhite:0.04 alpha:1.0];
++    self.settings = ACSettings.shared;
++    self.timing = [[ACTiming alloc] init];
++    self.thermalState = NSProcessInfo.processInfo.thermalState;
+ 
+     self.metalView = [[MTKView alloc] initWithFrame:CGRectZero device:MTLCreateSystemDefaultDevice()];
+     self.metalView.translatesAutoresizingMaskIntoConstraints = NO;
+     self.metalView.delegate = self;
+     self.metalView.preferredFramesPerSecond = 60;
+-    self.metalView.clearColor = MTLClearColorMake(0.04, 0.05, 0.07, 1.0);
++    self.metalView.clearColor = MTLClearColorMake(0.02, 0.025, 0.03, 1.0);
+     [self.view addSubview:self.metalView];
+     [NSLayoutConstraint activateConstraints:@[
+         [self.metalView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+@@ -341,97 +327,24 @@
+     ]];
+     ac_ios_set_metal_layer((__bridge void *)self.metalView.layer);
+ 
+-    [self buildMenu];
+-    [self buildHUD];
++    [self buildMenuScreens];
+     [self buildDrivingControls];
+     [self scanContent];
++    [self applySettingsToUI];
++    [self showHome];
+ 
+     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+-    [nc addObserver:self selector:@selector(acRootChanged:)
+-               name:ACiOSRootDidChangeNotification object:nil];
+-    [nc addObserver:self selector:@selector(gamepadChanged:)
+-               name:GCControllerDidConnectNotification object:nil];
+-    [nc addObserver:self selector:@selector(gamepadChanged:)
+-               name:GCControllerDidDisconnectNotification object:nil];
+-    [nc addObserver:self selector:@selector(appWillResign:)
+-               name:UIApplicationWillResignActiveNotification object:nil];
+-    [nc addObserver:self selector:@selector(appDidBecomeActive:)
+-               name:UIApplicationDidBecomeActiveNotification object:nil];
+-}
+-
+-- (void)viewDidLayoutSubviews {
+-    [super viewDidLayoutSubviews];
+-    UIEdgeInsets safe = self.view.safeAreaInsets;
+-    CGFloat w = self.view.bounds.size.width;
+-    CGFloat h = self.view.bounds.size.height;
+-
+-    // Compact menu panel: <= 32% of landscape width.
+-    CGFloat pw = MIN(300.0, w * 0.32);
+-    CGFloat px = safe.left + 10.0;
+-    CGFloat py = safe.top + 10.0;
+-    CGFloat ph = h - safe.top - safe.bottom - 20.0;
+-    self.menuPanel.frame = CGRectMake(px, py, pw, ph);
+-
+-    CGFloat x = 10.0, y = 6.0;
+-    self.folderButton.frame = CGRectMake(x, y, pw - 20.0, 30.0); y += 36.0;
+-    self.controlsButton.frame = CGRectMake(x, y, (pw - 26.0) / 2.0, 30.0);
+-    self.settingsButton.frame = CGRectMake(x + (pw - 26.0) / 2.0 + 6.0, y,
+-                                           (pw - 26.0) / 2.0, 30.0); y += 36.0;
+-    self.driveButton.frame = CGRectMake(x, y, pw - 20.0, 40.0); y += 48.0;
+-
+-    CGFloat listY = y;
+-    CGFloat listH = MAX(40.0, ph - listY - 12.0);
+-    self.menuTable.frame = CGRectMake(x, listY, pw - 20.0, listH);
+-    self.menuInfo.frame = self.menuTable.frame;
+-    self.debugToggleButton.frame = CGRectMake(x, listY + 4.0, pw - 20.0, 30.0);
+-    self.centerToggleButton.frame = CGRectMake(x, listY + 40.0, pw - 20.0, 30.0);
+-    self.masterSlider.frame = CGRectMake(x, listY + 82.0, pw - 90.0, 24.0);
+-    self.engineSlider.frame = CGRectMake(x, listY + 110.0, pw - 90.0, 24.0);
+-    self.effectsSlider.frame = CGRectMake(x, listY + 138.0, pw - 90.0, 24.0);
+-    self.muteButton.frame = CGRectMake(pw - 76.0, listY + 82.0, 60.0, 30.0);
+-    self.audioInfoLabel.frame = CGRectMake(x, listY + 170.0, pw - 20.0, 60.0);
+-
+-    // HUD at the top centre: clear of the left menu and the right buttons.
+-    CGFloat hw = 190.0;
+-    self.hudPanel.frame = CGRectMake((w - hw) / 2.0, safe.top + 8.0, hw, 48.0);
+-    self.hudSpeed.frame = CGRectMake(8.0, 2.0, 80.0, 44.0);
+-    self.hudRpm.frame = CGRectMake(88.0, 3.0, 58.0, 21.0);
+-    self.hudGear.frame = CGRectMake(146.0, 3.0, 38.0, 21.0);
+-
+-    // Right-hand camera / menu buttons.
+-    self.menuButton.frame = CGRectMake(w - safe.right - 10.0 - 62.0, safe.top + 8.0, 62.0, 32.0);
+-    self.cameraButton.frame = CGRectMake(CGRectGetMinX(self.menuButton.frame) - 8.0 - 68.0,
+-                                         safe.top + 8.0, 68.0, 32.0);
+-
+-    // Left thumb: wheel. Right thumb: brake (inner) + gas (outer).
+-    CGFloat wheelSize = MIN(158.0, h * 0.40);
+-    self.wheel.frame = CGRectMake(safe.left + 14.0, h - safe.bottom - 14.0 - wheelSize,
+-                                  wheelSize, wheelSize);
+-
+-    CGFloat pedalW = 64.0, pedalH = MIN(126.0, h * 0.32);
+-    CGFloat pedalY = h - safe.bottom - 14.0 - pedalH;
+-    CGFloat gasX = w - safe.right - 14.0 - pedalW;
+-    CGFloat brakeX = gasX - pedalW - 8.0;
+-    self.gasPedal.frame = CGRectMake(gasX, pedalY, pedalW, pedalH);
+-    self.brakePedal.frame = CGRectMake(brakeX, pedalY, pedalW, pedalH);
+-
+-    self.gearDownButton.frame = CGRectMake(brakeX, pedalY - 42.0, pedalW, 34.0);
+-    self.gearUpButton.frame = CGRectMake(gasX, pedalY - 42.0, pedalW, 34.0);
+-
+-    // Handbrake between the wheel and the pedals.
+-    self.handbrakeButton.frame = CGRectMake(CGRectGetMaxX(self.wheel.frame) + 14.0,
+-                                            h - safe.bottom - 14.0 - 52.0, 104.0, 52.0);
+-    self.gearboxButton.frame = CGRectMake(CGRectGetMinX(self.handbrakeButton.frame),
+-                                          CGRectGetMinY(self.handbrakeButton.frame) - 40.0,
+-                                          118.0, 34.0);
+-
+-    self.debugLabel.frame = CGRectMake(safe.left + 12.0, safe.top + 64.0,
+-                                       MIN(300.0, w * 0.32), 150.0);
+-    self.messageLabel.frame = CGRectMake((w - 520.0) / 2.0, (h - 80.0) / 2.0, 520.0, 80.0);
++    [nc addObserver:self selector:@selector(acRootChanged:) name:ACiOSRootDidChangeNotification object:nil];
++    [nc addObserver:self selector:@selector(gamepadChanged:) name:GCControllerDidConnectNotification object:nil];
++    [nc addObserver:self selector:@selector(gamepadChanged:) name:GCControllerDidDisconnectNotification object:nil];
++    [nc addObserver:self selector:@selector(appWillResign:) name:UIApplicationWillResignActiveNotification object:nil];
++    [nc addObserver:self selector:@selector(appDidBecomeActive:) name:UIApplicationDidBecomeActiveNotification object:nil];
++    [nc addObserver:self selector:@selector(thermalChanged:) name:NSProcessInfoThermalStateDidChangeNotification object:nil];
+ }
+ 
+ - (void)dealloc {
+     [NSNotificationCenter.defaultCenter removeObserver:self];
++    [self.timing stop];
+     ac_ios_audio_shutdown();
+     ac_ios_render_destroy();
+     ac_ios_metal_destroy();
+@@ -439,360 +352,612 @@
+     ac_ios_set_metal_layer(NULL);
+ }
+ 
+-#pragma mark - Build UI
+-
+-- (void)buildMenu {
+-    self.menuPanel = [[UIView alloc] initWithFrame:CGRectZero];
+-    self.menuPanel.backgroundColor = [[UIColor colorWithWhite:0.06 alpha:1.0] colorWithAlphaComponent:0.88];
+-    self.menuPanel.layer.cornerRadius = 14.0;
+-    self.menuPanel.layer.borderWidth = 1.0;
+-    self.menuPanel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+-    [self.view addSubview:self.menuPanel];
+-
+-    self.folderButton = [[ACRoundButton alloc] initWithTitle:@"Import AC folder" accent:NO];
+-    [self.folderButton addTarget:self action:@selector(chooseFolderTapped)
+-                forControlEvents:UIControlEventTouchUpInside];
+-    [self.menuPanel addSubview:self.folderButton];
+-
+-    self.controlsButton = [[ACRoundButton alloc] initWithTitle:@"Controls" accent:NO];
+-    [self.controlsButton addTarget:self action:@selector(controlsTapped)
+-                  forControlEvents:UIControlEventTouchUpInside];
+-    [self.menuPanel addSubview:self.controlsButton];
+-
+-    self.settingsButton = [[ACRoundButton alloc] initWithTitle:@"Settings" accent:NO];
+-    [self.settingsButton addTarget:self action:@selector(settingsTapped)
+-                  forControlEvents:UIControlEventTouchUpInside];
+-    [self.menuPanel addSubview:self.settingsButton];
+-
+-    self.driveButton = [[ACRoundButton alloc] initWithTitle:@"DRIVE" accent:YES];
+-    [self.driveButton addTarget:self action:@selector(driveTapped)
+-               forControlEvents:UIControlEventTouchUpInside];
+-    [self.menuPanel addSubview:self.driveButton];
+-
+-    self.menuTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+-    self.menuTable.dataSource = self;
+-    self.menuTable.delegate = self;
+-    self.menuTable.backgroundColor = UIColor.clearColor;
+-    self.menuTable.separatorColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+-    [self.menuTable registerClass:UITableViewCell.class forCellReuseIdentifier:@"content"];
+-    [self.menuPanel addSubview:self.menuTable];
+-
+-    self.menuInfo = [[UILabel alloc] initWithFrame:CGRectZero];
+-    self.menuInfo.numberOfLines = 0;
+-    self.menuInfo.font = [UIFont systemFontOfSize:11.0];
+-    self.menuInfo.textColor = [UIColor colorWithWhite:0.88 alpha:1.0];
+-    self.menuInfo.hidden = YES;
+-    [self.menuPanel addSubview:self.menuInfo];
+-
+-    self.debugToggleButton = [[ACRoundButton alloc] initWithTitle:@"Diagnostics: OFF" accent:NO];
+-    [self.debugToggleButton addTarget:self action:@selector(debugToggled)
+-                     forControlEvents:UIControlEventTouchUpInside];
+-    self.debugToggleButton.hidden = YES;
+-    [self.menuPanel addSubview:self.debugToggleButton];
+-
+-    self.centerToggleButton = [[ACRoundButton alloc] initWithTitle:@"Wheel auto-centre: ON" accent:NO];
+-    [self.centerToggleButton addTarget:self action:@selector(centerToggled)
+-                      forControlEvents:UIControlEventTouchUpInside];
+-    self.centerToggleButton.hidden = YES;
+-    [self.menuPanel addSubview:self.centerToggleButton];
+-
+-    // Audio settings. Values are published to the audio engine through FFI;
+-    // no audio work happens on the main thread beyond these small setters.
+-    self.masterSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+-    self.masterSlider.minimumValue = 0.0f; self.masterSlider.maximumValue = 1.0f;
+-    self.masterSlider.value = 0.8f;
+-    [self.masterSlider addTarget:self action:@selector(volumeChanged:)
+-                forControlEvents:UIControlEventValueChanged];
+-    self.engineSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+-    self.engineSlider.minimumValue = 0.0f; self.engineSlider.maximumValue = 1.0f;
+-    self.engineSlider.value = 0.9f;
+-    [self.engineSlider addTarget:self action:@selector(volumeChanged:)
+-                forControlEvents:UIControlEventValueChanged];
+-    self.effectsSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+-    self.effectsSlider.minimumValue = 0.0f; self.effectsSlider.maximumValue = 1.0f;
+-    self.effectsSlider.value = 0.7f;
+-    [self.effectsSlider addTarget:self action:@selector(volumeChanged:)
+-                forControlEvents:UIControlEventValueChanged];
+-    self.muteButton = [[ACRoundButton alloc] initWithTitle:@"Audio: ON" accent:NO];
+-    [self.muteButton addTarget:self action:@selector(muteTapped)
+-              forControlEvents:UIControlEventTouchUpInside];
+-    self.audioInfoLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+-    self.audioInfoLabel.numberOfLines = 0;
+-    self.audioInfoLabel.font = [UIFont systemFontOfSize:9.0];
+-    self.audioInfoLabel.textColor = [UIColor colorWithWhite:0.68 alpha:1.0];
+-    self.audioInfoLabel.text = @"Audio: diagnostic synth (not original AC FMOD banks)";
+-    for (UIView *v in @[self.masterSlider, self.engineSlider, self.effectsSlider,
+-                        self.muteButton, self.audioInfoLabel]) {
+-        v.hidden = YES;
+-        [self.menuPanel addSubview:v];
++#pragma mark - Screen construction
++
++- (void)buildMenuScreens {
++    self.menuContainer = [[UIView alloc] initWithFrame:CGRectZero];
++    self.menuContainer.backgroundColor = [UIColor colorWithWhite:0.035 alpha:0.97];
++    [self.view addSubview:self.menuContainer];
++
++    self.homeView = [[UIView alloc] initWithFrame:CGRectZero];
++    self.garageView = [[UIView alloc] initWithFrame:CGRectZero];
++    self.tracksView = [[UIView alloc] initWithFrame:CGRectZero];
++    self.modesView = [[UIView alloc] initWithFrame:CGRectZero];
++    self.settingsView = [[UIView alloc] initWithFrame:CGRectZero];
++    for (UIView *v in @[self.homeView, self.garageView, self.tracksView, self.modesView, self.settingsView]) {
++        v.backgroundColor = UIColor.clearColor;
++        [self.menuContainer addSubview:v];
++    }
++
++    // --- Home ---
++    UILabel *brand = [[UILabel alloc] initWithFrame:CGRectZero];
++    brand.text = @"ASSETTO CORSA";
++    brand.textColor = [UIColor colorWithRed:0.85 green:0.12 blue:0.12 alpha:1.0];
++    brand.font = [UIFont boldSystemFontOfSize:30];
++    brand.textAlignment = NSTextAlignmentCenter;
++    brand.tag = 1;
++    [self.homeView addSubview:brand];
++    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectZero];
++    sub.text = @"M O B I L E";
++    sub.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
++    sub.font = [UIFont boldSystemFontOfSize:12];
++    sub.textAlignment = NSTextAlignmentCenter;
++    sub.tag = 2;
++    [self.homeView addSubview:sub];
++
++    ACPanel *carCard = [[ACPanel alloc] initWithFrame:CGRectZero];
++    carCard.tag = 3; [self.homeView addSubview:carCard];
++    self.homeCar = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.homeCar.font = [UIFont boldSystemFontOfSize:26];
++    self.homeCar.textColor = UIColor.whiteColor;
++    self.homeCar.textAlignment = NSTextAlignmentCenter;
++    self.homeCar.adjustsFontSizeToFitWidth = YES;
++    [carCard addSubview:self.homeCar];
++    self.homeBest = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.homeBest.font = [UIFont systemFontOfSize:12];
++    self.homeBest.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
++    self.homeBest.textAlignment = NSTextAlignmentCenter;
++    [carCard addSubview:self.homeBest];
++
++    ACPanel *trackCard = [[ACPanel alloc] initWithFrame:CGRectZero];
++    trackCard.tag = 4; [self.homeView addSubview:trackCard];
++    self.homeTrack = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.homeTrack.font = [UIFont boldSystemFontOfSize:16];
++    self.homeTrack.textColor = UIColor.whiteColor;
++    self.homeTrack.textAlignment = NSTextAlignmentCenter;
++    [trackCard addSubview:self.homeTrack];
++    self.homeMode = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.homeMode.font = [UIFont systemFontOfSize:11];
++    self.homeMode.textColor = [UIColor colorWithRed:0.85 green:0.12 blue:0.12 alpha:1.0];
++    self.homeMode.textAlignment = NSTextAlignmentCenter;
++    [self.homeView addSubview:self.homeMode];
++
++    self.driveButton = [[ACButton alloc] initWithTitle:@"DRIVE" accent:YES];
++    self.driveButton.titleLabel.font = [UIFont boldSystemFontOfSize:24];
++    [self.driveButton addTarget:self action:@selector(driveTapped) forControlEvents:UIControlEventTouchUpInside];
++    [self.homeView addSubview:self.driveButton];
++
++    NSArray *titles = @[@"GARAGE", @"TRACKS", @"GAME MODES", @"SETTINGS", @"CONTENT"];
++    NSArray *actions = @[@"showGarage", @"showTracks", @"showModes", @"showSettings", @"chooseFolderTapped"];
++    NSMutableArray *rowButtons = [NSMutableArray array];
++    for (NSUInteger i = 0; i < titles.count; i++) {
++        ACButton *b = [[ACButton alloc] initWithTitle:titles[i] accent:NO];
++        b.titleLabel.font = [UIFont boldSystemFontOfSize:11];
++        [b addTarget:self action:NSSelectorFromString(actions[i]) forControlEvents:UIControlEventTouchUpInside];
++        [self.homeView addSubview:b];
++        [rowButtons addObject:b];
++    }
++
++    // --- Garage / Tracks / Modes ---
++    self.carsTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
++    self.tracksTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
++    self.modesTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
++    for (UITableView *t in @[self.carsTable, self.tracksTable, self.modesTable]) {
++        t.dataSource = self; t.delegate = self;
++        t.backgroundColor = UIColor.clearColor;
++        t.separatorColor = [UIColor colorWithWhite:1 alpha:0.08];
++        [t registerClass:UITableViewCell.class forCellReuseIdentifier:@"cell"];
++    }
++    [self.garageView addSubview:self.carsTable];
++    [self.tracksView addSubview:self.tracksTable];
++    [self.modesView addSubview:self.modesTable];
++
++    NSArray *screenViews = @[self.garageView, self.tracksView, self.modesView];
++    NSArray *backActions = @[@"showHome", @"showHome", @"showHome"];
++    for (NSUInteger i = 0; i < screenViews.count; i++) {
++        ACButton *back = [[ACButton alloc] initWithTitle:@"тА╣ BACK" accent:NO];
++        back.tag = 10;
++        [back addTarget:self action:NSSelectorFromString(backActions[i]) forControlEvents:UIControlEventTouchUpInside];
++        [screenViews[i] addSubview:back];
++        UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
++        title.tag = 11;
++        title.font = [UIFont boldSystemFontOfSize:18];
++        title.textColor = UIColor.whiteColor;
++        title.textAlignment = NSTextAlignmentCenter;
++        title.text = @[@"GARAGE", @"TRACKS", @"GAME MODES"][i];
++        [screenViews[i] addSubview:title];
++    }
++    ACButton *confirmCars = [[ACButton alloc] initWithTitle:@"SELECT VEHICLE" accent:YES];
++    confirmCars.tag = 12;
++    [confirmCars addTarget:self action:@selector(confirmCar) forControlEvents:UIControlEventTouchUpInside];
++    [self.garageView addSubview:confirmCars];
++    ACButton *confirmTracks = [[ACButton alloc] initWithTitle:@"SELECT TRACK" accent:YES];
++    confirmTracks.tag = 12;
++    [confirmTracks addTarget:self action:@selector(confirmTrack) forControlEvents:UIControlEventTouchUpInside];
++    [self.tracksView addSubview:confirmTracks];
++    ACButton *confirmModes = [[ACButton alloc] initWithTitle:@"SELECT MODE" accent:YES];
++    confirmModes.tag = 12;
++    [confirmModes addTarget:self action:@selector(confirmMode) forControlEvents:UIControlEventTouchUpInside];
++    [self.modesView addSubview:confirmModes];
++
++    // --- Settings ---
++    self.settingsScroll = [[UIScrollView alloc] initWithFrame:CGRectZero];
++    [self.settingsView addSubview:self.settingsScroll];
++    ACButton *settingsBack = [[ACButton alloc] initWithTitle:@"тА╣ BACK" accent:NO];
++    [settingsBack addTarget:self action:@selector(showHome) forControlEvents:UIControlEventTouchUpInside];
++    settingsBack.tag = 20;
++    [self.settingsView addSubview:settingsBack];
++
++    self.fpsButton = [[ACButton alloc] initWithTitle:@"FPS LIMIT: 60" accent:NO];
++    [self.fpsButton addTarget:self action:@selector(cycleFps) forControlEvents:UIControlEventTouchUpInside];
++    self.gameModeButton = [[ACButton alloc] initWithTitle:@"MODE: TIME ATTACK" accent:NO];
++    [self.gameModeButton addTarget:self action:@selector(cycleGameMode) forControlEvents:UIControlEventTouchUpInside];
++    self.unitsButton = [[ACButton alloc] initWithTitle:@"UNITS: KM/H" accent:NO];
++    [self.unitsButton addTarget:self action:@selector(toggleUnits) forControlEvents:UIControlEventTouchUpInside];
++    self.hudButton = [[ACButton alloc] initWithTitle:@"HUD: ON" accent:NO];
++    [self.hudButton addTarget:self action:@selector(toggleHud) forControlEvents:UIControlEventTouchUpInside];
++    self.diagButton = [[ACButton alloc] initWithTitle:@"DIAGNOSTICS: OFF" accent:NO];
++    [self.diagButton addTarget:self action:@selector(toggleDiagnostics) forControlEvents:UIControlEventTouchUpInside];
++    self.autoShiftButton = [[ACButton alloc] initWithTitle:@"GEARBOX: AUTO" accent:NO];
++    [self.autoShiftButton addTarget:self action:@selector(toggleAutoShifter) forControlEvents:UIControlEventTouchUpInside];
++    self.pedalLayoutButton = [[ACButton alloc] initWithTitle:@"PEDALS: DEFAULT" accent:NO];
++    [self.pedalLayoutButton addTarget:self action:@selector(togglePedalLayout) forControlEvents:UIControlEventTouchUpInside];
++    self.muteButton = [[ACButton alloc] initWithTitle:@"AUDIO: ON" accent:NO];
++    [self.muteButton addTarget:self action:@selector(toggleMute) forControlEvents:UIControlEventTouchUpInside];
++
++    self.masterSlider = [self makeSlider:@selector(volumeChanged:)];
++    self.engineSlider = [self makeSlider:@selector(volumeChanged:)];
++    self.effectsSlider = [self makeSlider:@selector(volumeChanged:)];
++    self.sensitivitySlider = [self makeSlider:@selector(controlChanged:)];
++    self.deadzoneSlider = [self makeSlider:@selector(controlChanged:)];
++    self.buttonScaleSlider = [self makeSlider:@selector(controlChanged:)];
++
++    ACButton *resetLayout = [[ACButton alloc] initWithTitle:@"RESET CONTROLS LAYOUT" accent:NO];
++    [resetLayout addTarget:self action:@selector(resetLayout) forControlEvents:UIControlEventTouchUpInside];
++    [resetLayout setTag:30];
++    [self.settingsScroll addSubview:resetLayout];
++
++    NSArray *settingViews = @[self.fpsButton, self.gameModeButton, self.unitsButton, self.hudButton,
++                              self.diagButton, self.autoShiftButton, self.pedalLayoutButton,
++                              self.muteButton, self.masterSlider, self.engineSlider,
++                              self.effectsSlider, self.sensitivitySlider, self.deadzoneSlider,
++                              self.buttonScaleSlider, resetLayout];
++    for (UIView *v in settingViews) [self.settingsScroll addSubview:v];
++    NSArray *labels = @[@"GRAPHICS", @"AUDIO", @"CONTROLS", @"GAMEPLAY"];
++    for (NSString *text in labels) {
++        UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
++        l.text = text; l.textColor = [UIColor colorWithRed:0.85 green:0.12 blue:0.12 alpha:1.0];
++        l.font = [UIFont boldSystemFontOfSize:11];
++        l.tag = 40;
++        [self.settingsScroll addSubview:l];
+     }
+ }
+ 
+-- (void)buildHUD {
+-    self.hudPanel = [[UIView alloc] initWithFrame:CGRectZero];
+-    self.hudPanel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.48];
+-    self.hudPanel.layer.cornerRadius = 10.0;
+-    [self.view addSubview:self.hudPanel];
++- (UISlider *)makeSlider:(SEL)action {
++    UISlider *s = [[UISlider alloc] initWithFrame:CGRectZero];
++    s.minimumValue = 0; s.maximumValue = 1;
++    [s addTarget:self action:action forControlEvents:UIControlEventValueChanged];
++    return s;
++}
+ 
++- (void)buildDrivingControls {
++    self.wheel = [[ACWheelControl alloc] initWithFrame:CGRectZero];
++    self.gasPedal = [[ACPedalControl alloc] initWithFrame:CGRectZero title:@"GAS"
++        color:[UIColor colorWithRed:0.25 green:0.82 blue:0.35 alpha:1]];
++    self.brakePedal = [[ACPedalControl alloc] initWithFrame:CGRectZero title:@"BRAKE"
++        color:[UIColor colorWithRed:0.94 green:0.28 blue:0.24 alpha:1]];
++    for (UIView *v in @[self.wheel, self.brakePedal, self.gasPedal]) [self.view addSubview:v];
++
++    self.gearDownButton = [[ACButton alloc] initWithTitle:@"GEAR -" accent:NO];
++    [self.gearDownButton addTarget:self action:@selector(gearDownTapped) forControlEvents:UIControlEventTouchDown];
++    self.gearUpButton = [[ACButton alloc] initWithTitle:@"GEAR +" accent:NO];
++    [self.gearUpButton addTarget:self action:@selector(gearUpTapped) forControlEvents:UIControlEventTouchDown];
++    self.handbrakeButton = [[ACButton alloc] initWithTitle:@"HANDBRAKE" accent:NO];
++    [self.handbrakeButton addTarget:self action:@selector(handbrakeDown) forControlEvents:UIControlEventTouchDown];
++    [self.handbrakeButton addTarget:self action:@selector(handbrakeUp)
++                   forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
++    self.cameraButton = [[ACButton alloc] initWithTitle:@"CAMERA" accent:NO];
++    [self.cameraButton addTarget:self action:@selector(cameraTapped) forControlEvents:UIControlEventTouchUpInside];
++    self.menuButton = [[ACButton alloc] initWithTitle:@"MENU" accent:NO];
++    [self.menuButton addTarget:self action:@selector(menuButtonTapped) forControlEvents:UIControlEventTouchUpInside];
++    self.gearboxButton = [[ACButton alloc] initWithTitle:@"AUTO" accent:NO];
++    [self.gearboxButton addTarget:self action:@selector(toggleAutoShifter) forControlEvents:UIControlEventTouchUpInside];
++    for (UIView *v in @[self.gearDownButton, self.gearUpButton, self.handbrakeButton,
++                        self.cameraButton, self.menuButton, self.gearboxButton]) [self.view addSubview:v];
++
++    self.hudPanel = [[ACPanel alloc] initWithFrame:CGRectZero];
+     self.hudSpeed = [[UILabel alloc] initWithFrame:CGRectZero];
+-    self.hudSpeed.font = [UIFont boldSystemFontOfSize:34.0];
++    self.hudSpeed.font = [UIFont boldSystemFontOfSize:32];
+     self.hudSpeed.textColor = UIColor.whiteColor;
+-    self.hudSpeed.text = @"0";
+-    [self.hudPanel addSubview:self.hudSpeed];
+-
+     self.hudRpm = [[UILabel alloc] initWithFrame:CGRectZero];
+-    self.hudRpm.font = [UIFont boldSystemFontOfSize:12.0];
+-    self.hudRpm.textColor = [UIColor colorWithWhite:0.82 alpha:1.0];
+-    self.hudRpm.text = @"0 rpm";
+-    [self.hudPanel addSubview:self.hudRpm];
+-
++    self.hudRpm.font = [UIFont boldSystemFontOfSize:12];
++    self.hudRpm.textColor = [UIColor colorWithWhite:0.8 alpha:1];
+     self.hudGear = [[UILabel alloc] initWithFrame:CGRectZero];
+-    self.hudGear.font = [UIFont boldSystemFontOfSize:20.0];
++    self.hudGear.font = [UIFont boldSystemFontOfSize:20];
+     self.hudGear.textAlignment = NSTextAlignmentCenter;
+-    self.hudGear.textColor = [UIColor colorWithRed:1.0 green:0.72 blue:0.25 alpha:1.0];
+-    self.hudGear.text = @"N";
++    self.hudGear.textColor = [UIColor colorWithRed:0.85 green:0.12 blue:0.12 alpha:1];
++    [self.hudPanel addSubview:self.hudSpeed];
++    [self.hudPanel addSubview:self.hudRpm];
+     [self.hudPanel addSubview:self.hudGear];
++    [self.view addSubview:self.hudPanel];
++
++    self.timingPanel = [[ACPanel alloc] initWithFrame:CGRectZero];
++    self.timingCurrent = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.timingCurrent.font = [UIFont boldSystemFontOfSize:17];
++    self.timingCurrent.textColor = UIColor.whiteColor;
++    self.timingBest = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.timingBest.font = [UIFont systemFontOfSize:10];
++    self.timingBest.textColor = [UIColor colorWithRed:0.9 green:0.35 blue:0.25 alpha:1];
++    self.timingLast = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.timingLast.font = [UIFont systemFontOfSize:10];
++    self.timingLast.textColor = [UIColor colorWithWhite:0.75 alpha:1];
++    self.timingLaps = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.timingLaps.font = [UIFont systemFontOfSize:10];
++    self.timingLaps.textColor = [UIColor colorWithWhite:0.75 alpha:1];
++    [self.timingPanel addSubview:self.timingCurrent];
++    [self.timingPanel addSubview:self.timingBest];
++    [self.timingPanel addSubview:self.timingLast];
++    [self.timingPanel addSubview:self.timingLaps];
++    [self.view addSubview:self.timingPanel];
+ 
+     self.debugLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+     self.debugLabel.numberOfLines = 0;
+-    self.debugLabel.font = [UIFont fontWithName:@"Menlo" size:10.0] ?: [UIFont systemFontOfSize:10.0];
+-    self.debugLabel.textColor = [UIColor colorWithWhite:0.75 alpha:0.9];
+-    self.debugLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.35];
+-    self.debugLabel.layer.cornerRadius = 6.0;
+-    self.debugLabel.hidden = YES;
++    self.debugLabel.font = [UIFont fontWithName:@"Menlo" size:9] ?: [UIFont systemFontOfSize:9];
++    self.debugLabel.textColor = [UIColor colorWithWhite:0.78 alpha:0.9];
++    self.debugLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.4];
++    self.debugLabel.layer.cornerRadius = 4;
+     [self.view addSubview:self.debugLabel];
+ 
+     self.messageLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+     self.messageLabel.numberOfLines = 0;
+     self.messageLabel.textAlignment = NSTextAlignmentCenter;
+-    self.messageLabel.font = [UIFont boldSystemFontOfSize:14.0];
+-    self.messageLabel.textColor = [UIColor colorWithRed:1.0 green:0.55 blue:0.35 alpha:1.0];
+-    self.messageLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.72];
+-    self.messageLabel.layer.cornerRadius = 10.0;
+-    self.messageLabel.hidden = YES;
++    self.messageLabel.font = [UIFont boldSystemFontOfSize:14];
++    self.messageLabel.textColor = [UIColor colorWithRed:1 green:0.55 blue:0.35 alpha:1];
++    self.messageLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
++    self.messageLabel.layer.cornerRadius = 6;
+     [self.view addSubview:self.messageLabel];
+ }
+ 
+-- (void)buildDrivingControls {
+-    // The wheel publishes its value through ACWheelControl.value; the render
+-    // loop reads it directly. No block capture -> no retain cycle per frame.
+-    self.wheel = [[ACWheelControl alloc] initWithFrame:CGRectZero];
+-    [self.view addSubview:self.wheel];
+-
+-    self.gasPedal = [[ACPedalControl alloc] initWithFrame:CGRectZero
+-                                                    title:@"GAS"
+-                                                    color:[UIColor colorWithRed:0.25 green:0.82 blue:0.35 alpha:1.0]];
+-    self.brakePedal = [[ACPedalControl alloc] initWithFrame:CGRectZero
+-                                                      title:@"BRAKE"
+-                                                      color:[UIColor colorWithRed:0.94 green:0.28 blue:0.24 alpha:1.0]];
+-    [self.view addSubview:self.brakePedal];
+-    [self.view addSubview:self.gasPedal];
+-
+-    self.gearDownButton = [[ACRoundButton alloc] initWithTitle:@"GEAR -" accent:NO];
+-    [self.gearDownButton addTarget:self action:@selector(gearDownTapped)
+-                  forControlEvents:UIControlEventTouchDown];
+-    self.gearUpButton = [[ACRoundButton alloc] initWithTitle:@"GEAR +" accent:NO];
+-    [self.gearUpButton addTarget:self action:@selector(gearUpTapped)
+-                forControlEvents:UIControlEventTouchDown];
+-    self.handbrakeButton = [[ACRoundButton alloc] initWithTitle:@"HANDBRAKE" accent:NO];
+-    [self.handbrakeButton addTarget:self action:@selector(handbrakeDown)
+-                   forControlEvents:UIControlEventTouchDown];
+-    [self.handbrakeButton addTarget:self action:@selector(handbrakeUp)
+-                   forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside |
+-                                    UIControlEventTouchCancel];
+-    self.cameraButton = [[ACRoundButton alloc] initWithTitle:@"CAMERA" accent:NO];
+-    [self.cameraButton addTarget:self action:@selector(cameraTapped)
+-                forControlEvents:UIControlEventTouchUpInside];
+-    self.menuButton = [[ACRoundButton alloc] initWithTitle:@"MENU" accent:NO];
+-    [self.menuButton addTarget:self action:@selector(menuTapped)
+-              forControlEvents:UIControlEventTouchUpInside];
+-    self.gearboxButton = [[ACRoundButton alloc] initWithTitle:@"AUTO" accent:NO];
+-    [self.gearboxButton addTarget:self action:@selector(gearboxToggled)
+-                 forControlEvents:UIControlEventTouchUpInside];
++#pragma mark - Layout
+ 
+-    for (UIView *v in @[self.gearDownButton, self.gearUpButton, self.handbrakeButton,
+-                        self.cameraButton, self.menuButton, self.gearboxButton]) {
+-        [self.view addSubview:v];
++- (void)viewDidLayoutSubviews {
++    [super viewDidLayoutSubviews];
++    UIEdgeInsets safe = self.view.safeAreaInsets;
++    CGFloat w = self.view.bounds.size.width;
++    CGFloat h = self.view.bounds.size.height;
++    self.menuContainer.frame = self.view.bounds;
++
++    // Home
++    CGFloat cx = w / 2;
++    UIView *brand = [self.homeView viewWithTag:1];
++    UIView *sub = [self.homeView viewWithTag:2];
++    brand.frame = CGRectMake(0, safe.top + 10, w, 36);
++    sub.frame = CGRectMake(0, safe.top + 46, w, 18);
++    UIView *carCard = [self.homeView viewWithTag:3];
++    UIView *trackCard = [self.homeView viewWithTag:4];
++    carCard.frame = CGRectMake(cx - 170, safe.top + 76, 340, 96);
++    self.homeCar.frame = CGRectMake(10, 12, 320, 40);
++    self.homeBest.frame = CGRectMake(10, 56, 320, 26);
++    trackCard.frame = CGRectMake(cx - 170, safe.top + 182, 340, 46);
++    self.homeTrack.frame = CGRectMake(10, 4, 320, 24);
++    self.homeMode.frame = CGRectMake(cx - 130, safe.top + 236, 260, 20);
++    self.driveButton.frame = CGRectMake(cx - 90, safe.top + 262, 180, 54);
++
++    CGFloat rowY = h - safe.bottom - 54;
++    CGFloat bw = (w - safe.left - safe.right - 40) / 5;
++    NSUInteger i = 0;
++    for (UIView *v in self.homeView.subviews) {
++        if ([v isKindOfClass:ACButton.class] && v != self.driveButton) {
++            v.frame = CGRectMake(safe.left + 8 + i * (bw + 6), rowY, bw, 40);
++            i++;
++        }
+     }
+-}
+ 
+-#pragma mark - Menu actions
++    // Lists
++    for (UIView *screen in @[self.garageView, self.tracksView, self.modesView]) {
++        UIView *back = [screen viewWithTag:10];
++        UIView *title = [screen viewWithTag:11];
++        UIView *confirm = [screen viewWithTag:12];
++        back.frame = CGRectMake(safe.left + 10, safe.top + 10, 90, 36);
++        title.frame = CGRectMake(cx - 100, safe.top + 10, 200, 36);
++        confirm.frame = CGRectMake(cx - 110, h - safe.bottom - 52, 220, 42);
++        CGFloat tableTop = safe.top + 58;
++        CGFloat tableH = h - safe.top - safe.bottom - 118;
++        UITableView *table = nil;
++        if (screen == self.garageView) table = self.carsTable;
++        else if (screen == self.tracksView) table = self.tracksTable;
++        else table = self.modesTable;
++        table.frame = CGRectMake(cx - 230, tableTop, 460, tableH);
++    }
+ 
+-- (void)chooseFolderTapped {
+-    AppDelegate *app = (AppDelegate *)UIApplication.sharedApplication.delegate;
+-    [app chooseACRootFrom:self];
++    // Settings
++    ACButton *settingsBack = [self.settingsView viewWithTag:20];
++    settingsBack.frame = CGRectMake(safe.left + 10, safe.top + 8, 90, 34);
++    self.settingsScroll.frame = CGRectMake(safe.left + 8, safe.top + 50,
++                                           w - safe.left - safe.right - 16,
++                                           h - safe.top - safe.bottom - 58);
++    CGFloat sw = self.settingsScroll.bounds.size.width - 40;
++    CGFloat sx = 20;
++    // Explicit order: section headers must stay above their controls.
++    NSMutableArray *sectionLabels = [NSMutableArray array];
++    for (UIView *v in self.settingsScroll.subviews) if (v.tag == 40) [sectionLabels addObject:v];
++    [sectionLabels sortUsingComparator:^NSComparisonResult(UILabel *a, UILabel *b) {
++        NSArray *order = @[@"GRAPHICS", @"AUDIO", @"CONTROLS", @"GAMEPLAY"];
++        return [@([order indexOfObject:a.text]) compare:@([order indexOfObject:b.text])];
++    }];
++    CGFloat y = 8;
++    for (UILabel *label in sectionLabels) {
++        label.frame = CGRectMake(sx, y, sw, 18);
++        y += 22;
++        if ([label.text isEqualToString:@"GRAPHICS"]) {
++            self.fpsButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++            self.gameModeButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++            self.unitsButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++        } else if ([label.text isEqualToString:@"AUDIO"]) {
++            self.masterSlider.frame = CGRectMake(sx, y, sw, 26); y += 34;
++            self.engineSlider.frame = CGRectMake(sx, y, sw, 26); y += 34;
++            self.effectsSlider.frame = CGRectMake(sx, y, sw, 26); y += 34;
++            self.muteButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++        } else if ([label.text isEqualToString:@"CONTROLS"]) {
++            self.sensitivitySlider.frame = CGRectMake(sx, y, sw, 26); y += 34;
++            self.deadzoneSlider.frame = CGRectMake(sx, y, sw, 26); y += 34;
++            self.buttonScaleSlider.frame = CGRectMake(sx, y, sw, 26); y += 34;
++            self.pedalLayoutButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++            self.hudButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++            self.diagButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++        } else {
++            self.autoShiftButton.frame = CGRectMake(sx, y, sw, 34); y += 40;
++            UIView *reset = [self.settingsScroll viewWithTag:30];
++            reset.frame = CGRectMake(sx, y, sw, 34); y += 42;
++        }
++        y += 8;
++    }
++    self.settingsScroll.contentSize = CGSizeMake(sw + 40, y + 20);
++
++    // Driving controls
++    CGFloat scale = MAX(0.85f, MIN(1.3f, self.settings.buttonScale));
++    CGFloat wheelSize = MIN(158, h * 0.40) * scale;
++    self.wheel.frame = CGRectMake(safe.left + 14, h - safe.bottom - 14 - wheelSize, wheelSize, wheelSize);
++    self.wheel.sensitivity = self.settings.steerSensitivity;
++    self.wheel.deadzone = self.settings.steerDeadzone;
++
++    CGFloat pedalW = 64 * scale;
++    CGFloat pedalH = MIN(126, h * 0.32) * scale;
++    CGFloat pedalY = h - safe.bottom - 14 - pedalH;
++    CGFloat gasX = w - safe.right - 14 - pedalW;
++    CGFloat brakeX = self.settings.pedalLayout == 0 ? gasX - pedalW - 8 : gasX - pedalW - 8;
++    self.gasPedal.frame = CGRectMake(gasX, pedalY, pedalW, pedalH);
++    self.brakePedal.frame = CGRectMake(brakeX, pedalY, pedalW, pedalH);
++    self.gearDownButton.frame = CGRectMake(brakeX, pedalY - 42, pedalW, 34);
++    self.gearUpButton.frame = CGRectMake(gasX, pedalY - 42, pedalW, 34);
++    self.handbrakeButton.frame = CGRectMake(CGRectGetMaxX(self.wheel.frame) + 14,
++                                            h - safe.bottom - 14 - 52 * scale, 104 * scale, 52 * scale);
++    self.gearboxButton.frame = CGRectMake(CGRectGetMinX(self.handbrakeButton.frame),
++                                          CGRectGetMinY(self.handbrakeButton.frame) - 40, 118, 34);
++    self.cameraButton.frame = CGRectMake(w - safe.right - 10 - 68, safe.top + 8, 68, 32);
++    self.menuButton.frame = CGRectMake(CGRectGetMinX(self.cameraButton.frame) - 8 - 62, safe.top + 8, 62, 32);
++
++    CGFloat hw = 190;
++    self.hudPanel.frame = CGRectMake((w - hw) / 2, safe.top + 8, hw, 48);
++    self.hudSpeed.frame = CGRectMake(8, 2, 80, 44);
++    self.hudRpm.frame = CGRectMake(88, 3, 58, 21);
++    self.hudGear.frame = CGRectMake(146, 3, 38, 21);
++    self.timingPanel.frame = CGRectMake((w - hw) / 2, safe.top + 64, hw, 72);
++    self.timingCurrent.frame = CGRectMake(10, 4, hw - 20, 24);
++    self.timingBest.frame = CGRectMake(10, 30, hw - 20, 14);
++    self.timingLast.frame = CGRectMake(10, 46, hw - 20, 14);
++    self.timingLaps.frame = CGRectMake(10, 60, hw - 20, 12);
++
++    self.debugLabel.frame = CGRectMake(safe.left + 12, safe.top + 144, MIN(310, w * 0.34), 170);
++    self.messageLabel.frame = CGRectMake((w - 520) / 2, (h - 80) / 2, 520, 80);
+ }
+ 
+-- (void)menuTapped {
+-    self.menuPanel.hidden = !self.menuPanel.hidden;
+-    if (!self.menuPanel.hidden) {
+-        // Opening the menu must not keep the car accelerating.
+-        [self.wheel setToNeutral];
+-        [self.gasPedal setToNeutral];
+-        [self.brakePedal setToNeutral];
+-        self.touchHandbrake = NO;
+-    }
++#pragma mark - Navigation
++
++- (void)showHome {
++    self.driving = NO;
++    self.menuContainer.hidden = NO;
++    for (UIView *v in @[self.homeView, self.garageView, self.tracksView, self.modesView, self.settingsView]) v.hidden = YES;
++    self.homeView.hidden = NO;
++    [self.view bringSubviewToFront:self.menuContainer];
++    [self updateHome];
++    [self hideDrivingUI:YES];
++}
++- (void)showGarage { [self showScreen:self.garageView]; [self.carsTable reloadData]; }
++- (void)showTracks { [self showScreen:self.tracksView]; [self.tracksTable reloadData]; }
++- (void)showModes  { [self showScreen:self.modesView]; [self.modesTable reloadData]; }
++- (void)showSettings { [self showScreen:self.settingsView]; [self applySettingsToUI]; }
++
++- (void)showScreen:(UIView *)screen {
++    self.menuContainer.hidden = NO;
++    for (UIView *v in @[self.homeView, self.garageView, self.tracksView, self.modesView, self.settingsView]) v.hidden = (v != screen);
++    [self.view bringSubviewToFront:self.menuContainer];
+ }
+ 
+-- (void)controlsTapped {
+-    self.menuTable.hidden = YES;
+-    self.menuInfo.hidden = NO;
+-    self.debugToggleButton.hidden = YES;
+-    self.centerToggleButton.hidden = YES;
+-    self.masterSlider.hidden = self.engineSlider.hidden = self.effectsSlider.hidden = YES;
+-    self.muteButton.hidden = self.audioInfoLabel.hidden = YES;
+-    self.menuInfo.text =
+-        @"DRIVING\n"
+-        "Wheel тАФ drag left/right to steer, release to centre.\n"
+-        "GAS / BRAKE тАФ slide thumb up for analogue pressure.\n"
+-        "GEAR +/- тАФ paddles. HANDBRAKE тАФ hold.\n"
+-        "CAMERA тАФ cycle AC's own views.\n\n"
+-        "GAMEPAD\n"
+-        "Left stick steer, RT gas, LT brake,\n"
+-        "A gear up, X gear down, B handbrake, Y camera.\n\n"
+-        "MENU pauses inputs without resetting the session.";
+-}
+-
+-- (void)settingsTapped {
+-    self.menuTable.hidden = YES;
+-    self.menuInfo.hidden = YES;
+-    self.debugToggleButton.hidden = NO;
+-    self.centerToggleButton.hidden = NO;
+-    self.masterSlider.hidden = NO;
+-    self.engineSlider.hidden = NO;
+-    self.effectsSlider.hidden = NO;
+-    self.muteButton.hidden = NO;
+-    self.audioInfoLabel.hidden = NO;
++- (void)hideDrivingUI:(BOOL)hidden {
++    for (UIView *v in @[self.wheel, self.gasPedal, self.brakePedal, self.gearUpButton,
++                        self.gearDownButton, self.handbrakeButton, self.cameraButton,
++                        self.menuButton, self.gearboxButton, self.hudPanel, self.timingPanel,
++                        self.debugLabel, self.messageLabel]) v.hidden = hidden;
+ }
+ 
+-- (void)volumeChanged:(UISlider *)sender {
+-    ac_ios_audio_set_volumes(self.masterSlider.value, self.engineSlider.value,
+-                             self.effectsSlider.value);
++- (void)menuButtonTapped {
++    if (!self.driving) return;
++    [self.timing pause];
++    [self resetTransientInput];
++    self.driving = NO;
++    self.menuContainer.hidden = NO;
++    [self showHome];
+ }
+ 
+-- (void)muteTapped {
+-    self.audioMuted = !self.audioMuted;
+-    ac_ios_audio_set_mute(self.audioMuted ? 1 : 0);
+-    [self.muteButton setTitle:(self.audioMuted ? @"Audio: OFF" : @"Audio: ON")
+-                     forState:UIControlStateNormal];
++- (void)updateHome {
++    self.homeCar.text = self.settings.selectedCar ?: @"тАФ";
++    self.homeTrack.text = self.settings.selectedTrack ?: @"тАФ";
++    uint32_t best = [self.settings bestMsForCar:self.settings.selectedCar track:self.settings.selectedTrack];
++    self.homeBest.text = best ? [NSString stringWithFormat:@"BEST  %@", [ACTiming formatMs:best]] : @"BEST  --:--.---";
++    NSArray *modeNames = @[@"PRACTICE", @"TIME ATTACK", @"HOTLAP", @"FREE DRIVE"];
++    NSInteger idx = MAX(0, MIN(3, self.settings.gameMode));
++    self.homeMode.text = [NSString stringWithFormat:@"MODE  %@", modeNames[idx]];
+ }
+ 
+-- (void)debugToggled {
+-    self.debugEnabled = !self.debugEnabled;
+-    self.debugLabel.hidden = !self.debugEnabled;
+-    [self.debugToggleButton setTitle:(self.debugEnabled ? @"Diagnostics: ON" : @"Diagnostics: OFF")
+-                            forState:UIControlStateNormal];
++- (void)applySettingsToUI {
++    uint32_t cap = ac_ios_fps_cap_for_index((int)self.settings.fpsCapIndex);
++    [self.fpsButton setTitle:[NSString stringWithFormat:@"FPS LIMIT: %@", cap ? @(cap).stringValue : @"AUTO"]
++                    forState:UIControlStateNormal];
++    NSArray *modes = @[@"PRACTICE", @"TIME ATTACK", @"HOTLAP", @"FREE DRIVE"];
++    [self.gameModeButton setTitle:[NSString stringWithFormat:@"MODE: %@", modes[MAX(0, MIN(3, self.settings.gameMode))]]
++                         forState:UIControlStateNormal];
++    [self.unitsButton setTitle:(self.settings.units ? @"UNITS: MPH" : @"UNITS: KM/H") forState:UIControlStateNormal];
++    [self.hudButton setTitle:(self.settings.hudVisible ? @"HUD: ON" : @"HUD: OFF") forState:UIControlStateNormal];
++    [self.diagButton setTitle:(self.settings.diagnosticsEnabled ? @"DIAGNOSTICS: ON" : @"DIAGNOSTICS: OFF") forState:UIControlStateNormal];
++    [self.autoShiftButton setTitle:(self.settings.autoShifter ? @"GEARBOX: AUTO" : @"GEARBOX: MANUAL") forState:UIControlStateNormal];
++    [self.gearboxButton setTitle:(self.settings.autoShifter ? @"AUTO" : @"MANUAL") forState:UIControlStateNormal];
++    [self.pedalLayoutButton setTitle:(self.settings.pedalLayout ? @"PEDALS: COMPACT" : @"PEDALS: DEFAULT") forState:UIControlStateNormal];
++    [self.muteButton setTitle:(self.settings.muted ? @"AUDIO: OFF" : @"AUDIO: ON") forState:UIControlStateNormal];
++    self.masterSlider.value = self.settings.masterVolume;
++    self.engineSlider.value = self.settings.engineVolume;
++    self.effectsSlider.value = self.settings.effectsVolume;
++    self.sensitivitySlider.value = (self.settings.steerSensitivity - 0.5f) / 1.5f;
++    self.deadzoneSlider.value = self.settings.steerDeadzone / 0.3f;
++    self.buttonScaleSlider.value = (self.settings.buttonScale - 0.85f) / 0.45f;
++    [self applyFpsCap];
+ }
+ 
+-- (void)centerToggled {
+-    self.returnToCenter = !self.returnToCenter;
+-    [self.centerToggleButton setTitle:(self.returnToCenter ? @"Wheel auto-centre: ON" : @"Wheel auto-centre: OFF")
+-                             forState:UIControlStateNormal];
++- (void)applyFpsCap {
++    uint32_t cap = ac_ios_fps_cap_for_index((int)self.settings.fpsCapIndex);
++    cap = ac_ios_thermal_cap(cap, (int)self.thermalState);
++    if (cap == 0) cap = 60; // Auto: stable system refresh, never 120 by default
++    self.metalView.preferredFramesPerSecond = (NSInteger)cap;
+ }
+ 
+-- (void)gearUpTapped { self.gearUpPending = YES; }
+-- (void)gearDownTapped { self.gearDownPending = YES; }
+-- (void)cameraTapped { self.cameraPending = YES; }
+-- (void)handbrakeDown { self.touchHandbrake = YES; }
+-- (void)handbrakeUp { self.touchHandbrake = NO; }
+-- (void)gearboxToggled {
+-    self.autoShifter = !self.autoShifter;
+-    [self.gearboxButton setTitle:(self.autoShifter ? @"AUTO" : @"MANUAL")
+-                        forState:UIControlStateNormal];
++- (void)thermalChanged:(NSNotification *)note {
++    self.thermalState = NSProcessInfo.processInfo.thermalState;
++    [self applyFpsCap];
+ }
+ 
+-#pragma mark - Session lifecycle
++#pragma mark - Settings actions
+ 
+-- (void)showMessage:(NSString *)text {
+-    self.messageLabel.text = text;
+-    self.messageLabel.hidden = NO;
+-    [self.view bringSubviewToFront:self.messageLabel];
++- (void)cycleFps {
++    self.settings.fpsCapIndex = (self.settings.fpsCapIndex + 1) % 5;
++    [self.settings save];
++    [self applySettingsToUI];
++}
++- (void)cycleGameMode {
++    self.settings.gameMode = (self.settings.gameMode + 1) % 4;
++    [self.settings save]; [self applySettingsToUI]; [self updateHome];
++}
++- (void)toggleUnits { self.settings.units = !self.settings.units; [self.settings save]; [self applySettingsToUI]; }
++- (void)toggleHud { self.settings.hudVisible = !self.settings.hudVisible; [self.settings save]; [self applySettingsToUI]; }
++- (void)toggleDiagnostics { self.settings.diagnosticsEnabled = !self.settings.diagnosticsEnabled; [self.settings save]; [self applySettingsToUI]; }
++- (void)toggleAutoShifter { self.settings.autoShifter = !self.settings.autoShifter; [self.settings save]; [self applySettingsToUI]; }
++- (void)togglePedalLayout { self.settings.pedalLayout = !self.settings.pedalLayout; [self.settings save]; [self applySettingsToUI]; }
++- (void)toggleMute {
++    self.settings.muted = !self.settings.muted;
++    ac_ios_audio_set_mute(self.settings.muted ? 1 : 0);
++    [self.settings save]; [self applySettingsToUI];
++}
++- (void)volumeChanged:(UISlider *)sender {
++    self.settings.masterVolume = self.masterSlider.value;
++    self.settings.engineVolume = self.engineSlider.value;
++    self.settings.effectsVolume = self.effectsSlider.value;
++    ac_ios_audio_set_volumes(self.settings.masterVolume, self.settings.engineVolume, self.settings.effectsVolume);
++    [self.settings save];
+ }
++- (void)controlChanged:(UISlider *)sender {
++    self.settings.steerSensitivity = 0.5f + self.sensitivitySlider.value * 1.5f;
++    self.settings.steerDeadzone = self.deadzoneSlider.value * 0.3f;
++    self.settings.buttonScale = 0.85f + self.buttonScaleSlider.value * 0.45f;
++    self.wheel.sensitivity = self.settings.steerSensitivity;
++    self.wheel.deadzone = self.settings.steerDeadzone;
++    [self.settings save];
++    [self viewDidLayoutSubviews];
++}
++- (void)resetLayout { [self.settings resetLayout]; [self applySettingsToUI]; [self viewDidLayoutSubviews]; }
++
++#pragma mark - Content / selection
+ 
+ - (void)scanContent {
+     NSString *root = self.acRootURL.path ?: @"";
+     ac_ios_set_content_root(root);
+     NSFileManager *fm = NSFileManager.defaultManager;
+-    NSString *carsPath = [root stringByAppendingPathComponent:@"content/cars"];
+-    NSString *tracksPath = [root stringByAppendingPathComponent:@"content/tracks"];
+-    self.cars = [[fm contentsOfDirectoryAtPath:carsPath error:NULL] ?: @[] sortedArrayUsingSelector:@selector(compare:)];
+-    self.tracks = [[fm contentsOfDirectoryAtPath:tracksPath error:NULL] ?: @[] sortedArrayUsingSelector:@selector(compare:)];
+-
+-    // Preserve an existing choice if the same content is still installed.
+-    BOOL carStillThere = [self.cars containsObject:self.selectedCar ?: @""];
+-    BOOL trackStillThere = [self.tracks containsObject:self.selectedTrack ?: @""];
+-    if (!carStillThere) self.selectedCar = self.cars.firstObject;
+-    if (!trackStillThere) self.selectedTrack = self.tracks.firstObject;
+-    self.showCarsInMenu = YES;
+-    [self.menuTable reloadData];
++    self.cars = [[fm contentsOfDirectoryAtPath:[root stringByAppendingPathComponent:@"content/cars"] error:NULL] ?: @[]
++        sortedArrayUsingSelector:@selector(compare:)];
++    self.tracks = [[fm contentsOfDirectoryAtPath:[root stringByAppendingPathComponent:@"content/tracks"] error:NULL] ?: @[]
++        sortedArrayUsingSelector:@selector(compare:)];
++    if (![self.cars containsObject:self.settings.selectedCar ?: @""]) self.settings.selectedCar = self.cars.firstObject ?: @"";
++    if (![self.tracks containsObject:self.settings.selectedTrack ?: @""]) self.settings.selectedTrack = self.tracks.firstObject ?: @"";
++    [self.settings save];
++    [self.carsTable reloadData]; [self.tracksTable reloadData]; [self updateHome];
+ }
+ 
+ - (void)acRootChanged:(NSNotification *)note {
+     self.acRootURL = note.object;
+     [self scanContent];
+-    [self showMessage:@"AC folder changed тАФ press DRIVE for a new real session"];
++    [self showMessage:@"AC folder changed тАФ press DRIVE for a new session"];
+ }
+ 
++- (void)chooseFolderTapped {
++    AppDelegate *app = (AppDelegate *)UIApplication.sharedApplication.delegate;
++    [app chooseACRootFrom:self];
++}
++
++- (void)confirmCar { [self showHome]; }
++- (void)confirmTrack { [self showHome]; }
++- (void)confirmMode { [self showHome]; }
++
++#pragma mark - Drive lifecycle
++
+ - (void)driveTapped {
++    if (!self.acRootURL) { [self showMessage:@"Import your Assetto Corsa folder first"]; return; }
+     self.lastFrameTime = 0;
+-    if (!self.acRootURL) {
+-        [self showMessage:@"Import your Assetto Corsa folder first"];
+-        return;
+-    }
+-    // Re-driving with a different car/track must not reuse a renderer loaded
+-    // for the previous session: tear down both GPU layers first.
+     ac_ios_render_destroy();
+     ac_ios_metal_destroy();
+     self.renderReady = NO;
+     [self resetTransientInput];
+ 
+-    ac_ios_set_auto_shifter(self.autoShifter ? 1 : 0);
+-    if (ac_ios_install_core_vtable() != 0) {
+-        [self showMessage:@"Failed to initialise the native core bridge"];
+-        return;
+-    }
++    ac_ios_set_auto_shifter(self.settings.autoShifter ? 1 : 0);
++    if (ac_ios_install_core_vtable() != 0) { [self showMessage:@"Native core bridge failed"]; return; }
+     const char *root = self.acRootURL.path.UTF8String ?: "";
+-    const char *car = self.selectedCar.UTF8String ?: "";
+-    const char *track = self.selectedTrack.UTF8String ?: "";
++    const char *car = self.settings.selectedCar.UTF8String ?: "";
++    const char *track = self.settings.selectedTrack.UTF8String ?: "";
+     self.sessionOpen = (ac_pal_bridge_open_session(root, car, track) == 0);
+-    if (!self.sessionOpen) {
+-        [self showMessage:@"Real rustyAC session failed тАФ see the app log"];
+-        return;
+-    }
++    if (!self.sessionOpen) { [self showMessage:@"Real rustyAC session failed тАФ see app log"]; return; }
+ 
+     CGFloat scale = self.metalView.contentScaleFactor;
+-    uint32_t width  = (uint32_t)(self.metalView.bounds.size.width  * scale);
++    uint32_t width = (uint32_t)(self.metalView.bounds.size.width * scale);
+     uint32_t height = (uint32_t)(self.metalView.bounds.size.height * scale);
+     char err[512] = {0};
+-    int metalResult = ac_ios_metal_init(ac_ios_metal_layer(), width, height, err, sizeof(err));
+-    if (metalResult != 0) {
+-        [self showMessage:[NSString stringWithFormat:@"Metal chain FAILED: %s", err]];
+-        return;
++    if (ac_ios_metal_init(ac_ios_metal_layer(), width, height, err, sizeof(err)) != 0) {
++        [self showMessage:[NSString stringWithFormat:@"Metal chain FAILED: %s", err]]; return;
+     }
+     uint64_t features[4] = {0};
+     ac_ios_metal_device_info(features);
+     self.metalFeatures = (unsigned long long)features[0];
+-
+-    int renderResult = ac_ios_render_init(ac_pal_bridge_session(), width, height, err, sizeof(err));
+-    if (renderResult != 0) {
+-        [self showMessage:[NSString stringWithFormat:@"Real AC renderer FAILED: %s", err]];
+-        return;
++    if (ac_ios_render_init(ac_pal_bridge_session(), width, height, err, sizeof(err)) != 0) {
++        [self showMessage:[NSString stringWithFormat:@"Real AC renderer FAILED: %s", err]]; return;
+     }
+     self.renderReady = YES;
+-    // Audio is independent of graphics: a failure here must not stop the game.
++
+     char audioErr[256] = {0};
+-    if (ac_ios_audio_init(audioErr, sizeof(audioErr)) != 0) {
+-        NSLog(@"ac_ios_audio: init failed (game continues): %s", audioErr);
+-        self.audioInfoLabel.text = [NSString stringWithFormat:@"Audio unavailable: %s", audioErr];
++    if (ac_ios_audio_init(audioErr, sizeof(audioErr)) == 0) {
++        ac_ios_audio_set_volumes(self.settings.masterVolume, self.settings.engineVolume,
++                                 self.settings.effectsVolume);
++        ac_ios_audio_set_mute(self.settings.muted ? 1 : 0);
+     } else {
+-        self.audioInfoLabel.text = @"Audio: diagnostic synth (not original AC FMOD banks)";
+-        ac_ios_audio_set_volumes(self.masterSlider.value, self.engineSlider.value,
+-                                 self.effectsSlider.value);
+-        ac_ios_audio_set_mute(self.audioMuted ? 1 : 0);
++        NSLog(@"ac_ios_audio: init failed (game continues): %s", audioErr);
+     }
++
++    // Time Attack / Hotlap use the REAL AC lap timer.
++    [self.timing stop];
++    __weak typeof(self) weakSelf = self;
++    self.timing.onLap = ^(uint32_t ms, BOOL pb, int32_t cuts) {
++        __strong typeof(weakSelf) self = weakSelf;
++        if (!self) return;
++        [self.settings submitLapMs:ms car:self.settings.selectedCar track:self.settings.selectedTrack
++                             valid:(cuts == 0) cuts:cuts];
++        if (pb) [self showMessage:[NSString stringWithFormat:@"NEW PB  %@", [ACTiming formatMs:ms]]];
++    };
++    uint32_t best = [self.settings bestMsForCar:self.settings.selectedCar track:self.settings.selectedTrack];
++    if (self.settings.gameMode == 1 || self.settings.gameMode == 2) [self.timing startWithBest:best];
++
++    [self applyFpsCap];
++    self.driving = YES;
++    self.menuContainer.hidden = YES;
++    [self hideDrivingUI:NO];
+     self.messageLabel.hidden = YES;
+-    // Drive closes the menu; MENU reopens it without touching the session.
+-    self.menuPanel.hidden = YES;
++    self.debugLabel.hidden = !self.settings.diagnosticsEnabled;
++    self.hudPanel.hidden = !self.settings.hudVisible;
++    self.timingPanel.hidden = (self.settings.gameMode != 1 && self.settings.gameMode != 2);
+ }
+ 
+ #pragma mark - Input lifetime
+@@ -806,55 +971,46 @@
+     self.lastGamepadGearUp = self.lastGamepadGearDown = self.lastGamepadCamera = NO;
+     self.lastFrameTime = 0;
+ }
+-
+ - (void)gamepadChanged:(NSNotification *)note { [self resetTransientInput]; }
+-- (void)appWillResign:(NSNotification *)note { [self resetTransientInput]; }
+-- (void)appDidBecomeActive:(NSNotification *)note { [self resetTransientInput]; }
++- (void)appWillResign:(NSNotification *)note { [self resetTransientInput]; [self.timing pause]; ac_ios_audio_suspend(); }
++- (void)appDidBecomeActive:(NSNotification *)note { [self resetTransientInput]; ac_ios_audio_resume(); }
++
++- (void)gearUpTapped { self.gearUpPending = YES; }
++- (void)gearDownTapped { self.gearDownPending = YES; }
++- (void)cameraTapped { self.cameraPending = YES; }
++- (void)handbrakeDown { self.touchHandbrake = YES; }
++- (void)handbrakeUp { self.touchHandbrake = NO; }
+ 
+-/// Touch values are already analogue from the two UIControl objects. There is
+-/// deliberately no sign flip here: rustyAC's CarControls is positive = right
+-/// and a right drag on ACWheelControl produces +value.
+ - (ACIosInputState)pollInput {
+     ACIosInputState state = {0};
+     GCController *pad = GCController.controllers.firstObject;
+-    BOOL padGearUp = NO, padGearDown = NO, padCamera = NO;
+-
++    BOOL padUp = NO, padDown = NO, padCamera = NO;
+     if (pad.extendedGamepad) {
+         GCExtendedGamepad *gp = pad.extendedGamepad;
+         state.steer = gp.leftThumbstick.xAxis.value;
+         state.throttle = gp.rightTrigger.value;
+         state.brake = gp.leftTrigger.value;
+         state.handbrake = gp.buttonB.isPressed ? 1 : 0;
+-        padGearUp = gp.buttonA.isPressed;
+-        padGearDown = gp.buttonX.isPressed;
+-        padCamera = gp.buttonY.isPressed;
++        padUp = gp.buttonA.isPressed; padDown = gp.buttonX.isPressed; padCamera = gp.buttonY.isPressed;
+     } else if (pad.microGamepad) {
+         GCMicroGamepad *gp = pad.microGamepad;
+         state.steer = gp.dpad.xAxis.value;
+-        state.throttle = gp.buttonA.isPressed ? 1.0f : 0.0f;
+-        state.brake = gp.buttonX.isPressed ? 1.0f : 0.0f;
+-        padGearUp = gp.buttonA.isPressed && gp.buttonX.isPressed;
++        state.throttle = gp.buttonA.isPressed ? 1 : 0;
++        state.brake = gp.buttonX.isPressed ? 1 : 0;
++        padUp = gp.buttonA.isPressed && gp.buttonX.isPressed;
+     } else {
+         state.steer = self.wheel.value;
+         state.throttle = self.gasPedal.value;
+         state.brake = self.brakePedal.value;
+         state.handbrake = self.touchHandbrake ? 1 : 0;
+     }
+-
+-    // An open menu must never leave the car driving itself.
+-    if (!self.menuPanel.hidden) {
+-        state.steer = 0.0f;
+-        state.throttle = 0.0f;
+-        state.brake = 0.0f;
+-        state.handbrake = 0;
++    if (!self.driving) {
++        state.steer = state.throttle = state.brake = 0; state.handbrake = 0;
+     }
+-
+-    state.gear_up = (padGearUp && !self.lastGamepadGearUp) || self.gearUpPending;
+-    state.gear_down = (padGearDown && !self.lastGamepadGearDown) || self.gearDownPending;
++    state.gear_up = (padUp && !self.lastGamepadGearUp) || self.gearUpPending;
++    state.gear_down = (padDown && !self.lastGamepadGearDown) || self.gearDownPending;
+     state.camera_request = (padCamera && !self.lastGamepadCamera) || self.cameraPending;
+-    self.lastGamepadGearUp = padGearUp;
+-    self.lastGamepadGearDown = padGearDown;
+-    self.lastGamepadCamera = padCamera;
++    self.lastGamepadGearUp = padUp; self.lastGamepadGearDown = padDown; self.lastGamepadCamera = padCamera;
+     self.gearUpPending = self.gearDownPending = self.cameraPending = NO;
+     return state;
+ }
+@@ -864,11 +1020,8 @@
+ - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
+     if (ac_ios_metal_is_ready()) {
+         CGFloat scale = view.contentScaleFactor;
+-        uint32_t w = (uint32_t)(size.width * scale);
+-        uint32_t h = (uint32_t)(size.height * scale);
+-        if (ac_ios_metal_resize(w, h) == 0 && self.renderReady) {
+-            ac_ios_render_resize(w, h);
+-        }
++        uint32_t w = (uint32_t)(size.width * scale), h = (uint32_t)(size.height * scale);
++        if (ac_ios_metal_resize(w, h) == 0 && self.renderReady) ac_ios_render_resize(w, h);
+     }
+ }
+ 
+@@ -877,69 +1030,66 @@
+     double delta = self.lastFrameTime > 0 ? (now - self.lastFrameTime) : 1.0 / 60.0;
+     self.lastFrameTime = now;
+     if (delta > 0.1) delta = 0.1;
+-    if (delta > 0.0) {
++    if (delta > 0) {
+         float instant = (float)(1.0 / delta);
+-        self.smoothedFps = self.smoothedFps > 0.0f
+-            ? self.smoothedFps * 0.9f + instant * 0.1f : instant;
++        self.smoothedFps = self.smoothedFps > 0 ? self.smoothedFps * 0.9f + instant * 0.1f : instant;
+     }
+ 
+     ACIosInputState input = [self pollInput];
+     ac_ios_set_input(input);
++    CFAbsoluteTime physicsStart = CFAbsoluteTimeGetCurrent();
+     ac_pal_bridge_set_controls(input.steer, input.throttle, input.brake,
+-                               input.handbrake ? 1.0f : 0.0f,
++                               input.handbrake ? 1 : 0,
+                                input.gear_up, input.gear_down, input.camera_request);
+     ac_pal_bridge_run_frame(delta);
++    self.lastPhysicsMs = (CFAbsoluteTimeGetCurrent() - physicsStart) * 1000.0;
++
++    float s[16] = {0};
++    ac_pal_bridge_snapshot(s);
++    ac_ios_audio_set_state(s[1], s[3], s[4], s[0], s[2]);
++
++    if (self.driving && (self.settings.gameMode == 1 || self.settings.gameMode == 2)) {
++        ACIosLapState lap = {0};
++        if (ac_ios_lap_state(&lap) == 0) [self.timing updateWithLap:lap];
++    }
+ 
+-    float snapshot[16] = {0};
+-    ac_pal_bridge_snapshot(snapshot);
+-    float speed = snapshot[0];
+-    float rpm = snapshot[1];
+-    float gear = snapshot[2];
+-    float gas = snapshot[3];
+-    float brake = snapshot[4];
+-    float steer = snapshot[5];
+-    float steps = snapshot[6];
+-    float trackLoaded = snapshot[7];
+-    // Real telemetry -> diagnostic audio (no timers, no invented engine state).
+-    ac_ios_audio_set_state(rpm, gas, brake, speed, gear);
+-
+-    // HUD: only three small labels, throttled to 10 Hz to avoid allocations.
+     if (++self.telemetryFrame % 6 == 0) {
+-        self.hudSpeed.text = [NSString stringWithFormat:@"%.0f", speed];
+-        self.hudRpm.text = [NSString stringWithFormat:@"%.0f rpm", rpm];
+-        self.hudGear.text = gear < 0.5f ? @"N" : [NSString stringWithFormat:@"%.0f", gear];
+-        if (self.debugEnabled) {
++        if (self.settings.hudVisible) {
++            self.hudSpeed.text = [NSString stringWithFormat:@"%.0f", s[0]];
++            self.hudRpm.text = [NSString stringWithFormat:@"%.0f rpm", s[1]];
++            self.hudGear.text = s[2] < 0.5 ? @"N" : [NSString stringWithFormat:@"%.0f", s[2]];
++        }
++        if (!self.timingPanel.hidden) {
++            self.timingCurrent.text = [ACTiming formatMs:self.timing.currentMs];
++            self.timingBest.text = [NSString stringWithFormat:@"BEST  %@",
++                self.timing.bestLapMs ? [ACTiming formatMs:self.timing.bestLapMs] : @"--:--.---"];
++            self.timingLast.text = [NSString stringWithFormat:@"LAST  %@",
++                self.timing.lastLapMs ? [ACTiming formatMs:self.timing.lastLapMs] : @"--:--.---"];
++            self.timingLaps.text = [NSString stringWithFormat:@"LAP %u", self.timing.lapCount + 1];
++        }
++        if (self.settings.diagnosticsEnabled && self.driving) {
+             char audioStatus[256] = {0};
+             ac_ios_audio_status(audioStatus, sizeof(audioStatus));
+-            uint64_t texLoaded = 0, texFailed = 0, texCpu = 0;
+-            ac_ios_texture_stats(&texLoaded, &texFailed, &texCpu);
++            uint64_t texOk = 0, texErr = 0, texCpu = 0;
++            ac_ios_texture_stats(&texOk, &texErr, &texCpu);
++            uint32_t cap = ac_ios_thermal_cap(ac_ios_fps_cap_for_index((int)self.settings.fpsCapIndex),
++                                              (int)self.thermalState);
+             self.debugLabel.text = [NSString stringWithFormat:
+-                @"REAL AC SESSION: %@\n"
+-                "Scene: %@\n"
+-                "Track: %@\n"
+-                "Physics steps: %.0f\n"
+-                "FPS: %.1f\n"
+-                "Render: %.2f ms\n"
+-                "Metal features: 0x%llx\n"
+-                "Textures ok/err/CPU: %llu/%llu/%llu\n"
+-                "gas %.2f brake %.2f\n"
+-                "steer %.2f (%@)\n"
+-                "audio: %s",
+-                self.sessionOpen ? @"yes" : @"NO",
+-                self.renderReady ? @"loaded" : @"none",
+-                trackLoaded > 0.5 ? @"loaded" : @"none",
+-                steps, self.smoothedFps,
++                @"FPS %.1f | cap %u | thermal %ld\n"
++                "frame %.1f ms | physics %.2f ms\n"
++                "render %.2f ms | mem %.0f MB\n"
++                "tex %llu/%llu/%llu | metal 0x%llx\n"
++                "audio %s",
++                self.smoothedFps, cap, (long)self.thermalState,
++                delta * 1000.0, self.lastPhysicsMs,
+                 ac_ios_render_last_draw_ms(),
+-                self.metalFeatures,
+-                (unsigned long long)texLoaded, (unsigned long long)texFailed,
+-                (unsigned long long)texCpu,
+-                gas, brake, steer,
+-                steer > 0.02f ? @"right" : (steer < -0.02f ? @"left" : @"centre"),
+-                audioStatus];
++                ac_ios_memory_footprint() / (1024.0 * 1024.0),
++                (unsigned long long)texOk, (unsigned long long)texErr,
++                (unsigned long long)texCpu, self.metalFeatures, audioStatus];
+         }
+     }
+ 
+-    if (self.renderReady) {
++    if (self.driving && self.renderReady) {
+         if (ac_ios_render_frame(ac_pal_bridge_session()) != 0) {
+             self.renderReady = NO;
+             [self showMessage:@"Real renderer frame failed тАФ see app log"];
+@@ -947,34 +1097,50 @@
+     }
+ }
+ 
+-#pragma mark - UITableView
+-
+-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+-
+-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+-    return section == 0 ? self.cars.count : self.tracks.count;
++- (void)showMessage:(NSString *)text {
++    self.messageLabel.text = text;
++    self.messageLabel.hidden = NO;
++    [self.view bringSubviewToFront:self.messageLabel];
+ }
+ 
+-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+-    return section == 0 ? @"Cars (your install)" : @"Tracks (your install)";
+-}
++#pragma mark - Tables
+ 
+-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"content" forIndexPath:indexPath];
+-    cell.textLabel.text = indexPath.section == 0 ? self.cars[indexPath.row] : self.tracks[indexPath.row];
+-    cell.textLabel.font = [UIFont systemFontOfSize:13.0];
+-    cell.backgroundColor = UIColor.clearColor;
++- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return tv == self.modesTable ? 1 : 1; }
++- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
++    if (tv == self.carsTable) return self.cars.count;
++    if (tv == self.tracksTable) return self.tracks.count;
++    return 5; // practice, time attack, hotlap, free drive, race (coming later)
++}
++- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
++    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"cell" forIndexPath:ip];
++    cell.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1];
+     cell.textLabel.textColor = UIColor.whiteColor;
+-    cell.accessoryType = ([cell.textLabel.text isEqualToString:self.selectedCar] ||
+-                          [cell.textLabel.text isEqualToString:self.selectedTrack])
+-                         ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
++    cell.textLabel.font = [UIFont systemFontOfSize:14];
++    NSString *name = nil;
++    BOOL selected = NO;
++    if (tv == self.carsTable) {
++        name = self.cars[ip.row];
++        selected = [name isEqualToString:self.settings.selectedCar];
++    } else if (tv == self.tracksTable) {
++        name = self.tracks[ip.row];
++        selected = [name isEqualToString:self.settings.selectedTrack];
++    } else {
++        NSArray *modes = @[@"PRACTICE", @"TIME ATTACK", @"HOTLAP", @"FREE DRIVE", @"RACE тАФ COMING LATER"];
++        name = modes[ip.row];
++        selected = ip.row == self.settings.gameMode;
++        cell.textLabel.textColor = ip.row == 4 ? [UIColor colorWithWhite:0.45 alpha:1] : UIColor.whiteColor;
++    }
++    cell.textLabel.text = name;
++    cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+     return cell;
+ }
+-
+-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+-    if (indexPath.section == 0) self.selectedCar = self.cars[indexPath.row];
+-    else self.selectedTrack = self.tracks[indexPath.row];
+-    [tableView reloadData];
++- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
++    if (tv == self.carsTable) self.settings.selectedCar = self.cars[ip.row];
++    else if (tv == self.tracksTable) self.settings.selectedTrack = self.tracks[ip.row];
++    else if (tv == self.modesTable && ip.row < 4) self.settings.gameMode = ip.row;
++    [self.settings save];
++    [tv reloadData];
++    [self updateHome];
+ }
+ 
+ @end
+diff --git a/ios/ios_bridge.h b/ios/ios_bridge.h
+index 9e14760..db07ccb 100644
+--- a/ios/ios_bridge.h
++++ b/ios/ios_bridge.h
+@@ -11,6 +11,19 @@
+ extern "C" {
+ #endif
+ 
++/* Real AC lap timer state, mirrored from Rust `AcIosLapState` (fixed-width only). */
++typedef struct {
++    uint32_t current_ms;
++    uint32_t last_ms;
++    uint32_t best_ms;
++    uint32_t laps;
++    uint32_t on_track;
++    uint32_t valid;
++    uint32_t last_valid;
++    int32_t  cuts;
++    float    position;
++} ACIosLapState;
++
+ typedef struct {
+     float steer;          /* -1..1 */
+     float throttle;       /*  0..1 */
+@@ -37,6 +50,16 @@ void ac_ios_audio_set_volumes(float master, float engine, float effects);
+ void ac_ios_audio_set_mute(int muted);
+ int  ac_ios_audio_status(char *buf, size_t cap);
+ void ac_ios_texture_stats(uint64_t *loaded, uint64_t *failed, uint64_t *cpu_decoded_bc);
++
++/* Phase 11: real AC lap timer, tested UI helpers, memory footprint. */
++int  ac_ios_lap_state(ACIosLapState *out);
++int  ac_ios_format_lap_ms(uint32_t ms, char *buf, size_t cap);
++int64_t ac_ios_lap_delta_ms(uint32_t lap_ms, uint32_t best_ms);
++int  ac_ios_should_accept_pb(uint32_t candidate_ms, uint32_t valid, int32_t cuts, uint32_t best_ms);
++uint32_t ac_ios_fps_cap_for_index(int index);
++int  ac_ios_fps_index_for_cap(uint32_t cap);
++uint32_t ac_ios_thermal_cap(uint32_t user_cap, int thermal_state);
++uint64_t ac_ios_memory_footprint(void);
+ void *ac_ios_metal_layer(void);
+ void ac_ios_set_metal_layer(void *layer);   /* pass NULL on view teardown */
+ #ifdef __OBJC__
+diff --git a/ios/ios_bridge.m b/ios/ios_bridge.m
+index 5ec3117..b340ead 100644
+--- a/ios/ios_bridge.m
++++ b/ios/ios_bridge.m
+@@ -8,6 +8,10 @@
+ #import <AudioToolbox/AudioToolbox.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <UIKit/UIKit.h>
++#import <mach/mach.h>
++
++/* Exported by the Rust staticlib (ac-ios-runtime). */
++extern void ac_ios_core_lap_state(void *session, ACIosLapState *out);
+ 
+ static NSString *gContentRoot = @"";
+ static ACIosInputState gInput = {0};
+@@ -274,6 +278,24 @@ void *ac_ios_metal_layer(void) {
+     return (__bridge void *)gMetalLayer;
+ }
+ 
++int ac_ios_lap_state(ACIosLapState *out) {
++    if (!out) return -1;
++    memset(out, 0, sizeof(*out));
++    void *session = ac_pal_bridge_session();
++    if (!session) return -1;
++    ac_ios_core_lap_state(session, out);
++    return 0;
++}
++
++uint64_t ac_ios_memory_footprint(void) {
++    mach_task_basic_info_data_t info;
++    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
++    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
++        return 0;
++    }
++    return (uint64_t)info.phys_footprint;
++}
++
+ int ac_ios_install_core_vtable(void) {
+     AcCoreVTable vtable = {0};
+     if (ac_ios_boot(&vtable) != 0) return -1;
+diff --git a/ios/project.yml b/ios/project.yml
+index b6e4773..ea91a1d 100644
+--- a/ios/project.yml
++++ b/ios/project.yml
+@@ -22,6 +22,10 @@ targets:
+       - path: main.m
+       - path: AppDelegate.m
+       - path: GameViewController.m
++      - path: ACSettings.h
++      - path: ACSettings.m
++      - path: ACTiming.h
++      - path: ACTiming.m
+       - path: ios_bridge.m
+       - path: ../core/ac_pal_bridge.c
+       - path: ../core/ac_pal_bridge.h
+diff --git a/rust/ac-ios-runtime/src/lib.rs b/rust/ac-ios-runtime/src/lib.rs
+index 8e415b0..5a58d7c 100644
+--- a/rust/ac-ios-runtime/src/lib.rs
++++ b/rust/ac-ios-runtime/src/lib.rs
+@@ -17,6 +17,50 @@ mod meminfo;
+ mod metal;
+ #[cfg(target_os = "ios")]
+ mod render;
++/// Phase 11 UI helpers (lap formatting, FPS caps, PB rules). Pure and tested.
++pub mod phase11;
++
++/// Real AC lap-timer state for the Time Attack UI. Mirrors `ACIosLapState` in
++/// `ios/ios_bridge.h`; only fixed-width C fields, no padding-sensitive bools.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct AcIosLapState {
++    pub current_ms: u32,
++    pub last_ms: u32,
++    pub best_ms: u32,
++    pub laps: u32,
++    pub on_track: u32,
++    pub valid: u32,
++    pub last_valid: u32,
++    pub cuts: i32,
++    pub position: f32,
++}
++
++/// Reads the REAL AC lap timer from the live GameSim (never a wall-clock guess).
++///
++/// # Safety
++/// `session` must be a live handle from `ac_ios_core_session_create`; `out` must
++/// point to a writable `AcIosLapState`.
++#[no_mangle]
++pub unsafe extern "C" fn ac_ios_core_lap_state(session: *mut c_void, out: *mut AcIosLapState) {
++    if out.is_null() { return; }
++    std::ptr::write_bytes(out, 0, 1);
++    let Some(session) = as_session(session) else { return };
++    let Ok(guard) = session.session.lock() else { return };
++    let Some(real) = guard.as_ref() else { return };
++    let lap = rustyac_game::view::CarView::capture(&real.sim, 0.0).lap;
++    *out = AcIosLapState {
++        current_ms: lap.current_ms,
++        last_ms: lap.last_ms,
++        best_ms: lap.best_ms,
++        laps: lap.laps,
++        on_track: lap.on_track as u32,
++        valid: lap.valid as u32,
++        last_valid: lap.last_valid as u32,
++        cuts: lap.cuts,
++        position: lap.position,
++    };
++}
+ 
+ use std::ffi::CStr;
+ use std::os::raw::{c_char, c_double, c_int, c_void};

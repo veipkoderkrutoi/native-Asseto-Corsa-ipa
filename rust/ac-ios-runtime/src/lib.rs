@@ -17,6 +17,50 @@ mod meminfo;
 mod metal;
 #[cfg(target_os = "ios")]
 mod render;
+/// Phase 11 UI helpers (lap formatting, FPS caps, PB rules). Pure and tested.
+pub mod phase11;
+
+/// Real AC lap-timer state for the Time Attack UI. Mirrors `ACIosLapState` in
+/// `ios/ios_bridge.h`; only fixed-width C fields, no padding-sensitive bools.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AcIosLapState {
+    pub current_ms: u32,
+    pub last_ms: u32,
+    pub best_ms: u32,
+    pub laps: u32,
+    pub on_track: u32,
+    pub valid: u32,
+    pub last_valid: u32,
+    pub cuts: i32,
+    pub position: f32,
+}
+
+/// Reads the REAL AC lap timer from the live GameSim (never a wall-clock guess).
+///
+/// # Safety
+/// `session` must be a live handle from `ac_ios_core_session_create`; `out` must
+/// point to a writable `AcIosLapState`.
+#[no_mangle]
+pub unsafe extern "C" fn ac_ios_core_lap_state(session: *mut c_void, out: *mut AcIosLapState) {
+    if out.is_null() { return; }
+    std::ptr::write_bytes(out, 0, 1);
+    let Some(session) = as_session(session) else { return };
+    let Ok(guard) = session.session.lock() else { return };
+    let Some(real) = guard.as_ref() else { return };
+    let lap = rustyac_game::view::CarView::capture(&real.sim, 0.0).lap;
+    *out = AcIosLapState {
+        current_ms: lap.current_ms,
+        last_ms: lap.last_ms,
+        best_ms: lap.best_ms,
+        laps: lap.laps,
+        on_track: lap.on_track as u32,
+        valid: lap.valid as u32,
+        last_valid: lap.last_valid as u32,
+        cuts: lap.cuts,
+        position: lap.position,
+    };
+}
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_double, c_int, c_void};

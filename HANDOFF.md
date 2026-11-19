@@ -1,4 +1,4 @@
-# HANDOFF — Assetto Corsa iOS Port (Phase 10 Crash Forensics)
+# HANDOFF — Assetto Corsa iOS Port (Phase 11 Mobile Experience)
 
 ## ГДЕ ВСЁ НАХОДИТСЯ
 
@@ -99,6 +99,23 @@ AC-сцену, машина едет, телеметрия/камеры рабо
   `checkpoint/before_phase10/`, `after_phase10/`.
 - Raw syslog с PII в `phase10/crash_forensics/` — НЕ коммитить (audit исключает).
 - **REAL DEVICE DRIVE VALIDATION: NOT CONFIRMED** — нужно поставить новую IPA.
+
+## PHASE 11 — MOBILE EXPERIENCE
+
+- Новый UI: Home/Garage/Tracks/Game Modes/Settings + in-race HUD и timing panel.
+  Стиль AC: графит/чёрный, красный акцент, безопасные области respecting.
+- Игровые режимы: Practice/Time Attack/Hotlap/Free Drive выбираемы; Race — COMING LATER.
+- **Time Attack:** использует РЕАЛЬНЫй AC lap timer (`LapView.current_ms/last_ms/best_ms/laps/valid/cuts`)
+  через `ac_ios_core_lap_state`; текущий круг — monotonic `mach_absolute_time`.
+  PB хранится пер car|track в NSUserDefaults, принимается tested Rust rule.
+- **FPS limiter:** Auto/30/40/45/60 → `MTKView.preferredFramesPerSecond`; физика
+  НЕ замедляется (333 Hz fixed step). Thermal serious/critical → 30 через публичный API.
+- Settings: FPS, аудио, sensitivity/deadzone, button scale, pedal layout, HUD,
+  diagnostics, game mode, units, auto shifter — всё сохраняется и применяется.
+- Новые файлы: `ios/ACSettings.{h,m}`, `ios/ACTiming.{h,m}`, `rust/.../phase11.rs`.
+- Тесты: rustyac-render 42 PASS, ac-ios-runtime 9 PASS, iOS check PASS, verify 52/52,
+  prepush PASS. REPORTs: `phase11/*.md`. Патч `patches/phase11/`.
+- **Не проверено на iPhone после Phase 11** — нужно новая IPA.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 

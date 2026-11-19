@@ -11,6 +11,19 @@
 extern "C" {
 #endif
 
+/* Real AC lap timer state, mirrored from Rust `AcIosLapState` (fixed-width only). */
+typedef struct {
+    uint32_t current_ms;
+    uint32_t last_ms;
+    uint32_t best_ms;
+    uint32_t laps;
+    uint32_t on_track;
+    uint32_t valid;
+    uint32_t last_valid;
+    int32_t  cuts;
+    float    position;
+} ACIosLapState;
+
 typedef struct {
     float steer;          /* -1..1 */
     float throttle;       /*  0..1 */
@@ -37,6 +50,16 @@ void ac_ios_audio_set_volumes(float master, float engine, float effects);
 void ac_ios_audio_set_mute(int muted);
 int  ac_ios_audio_status(char *buf, size_t cap);
 void ac_ios_texture_stats(uint64_t *loaded, uint64_t *failed, uint64_t *cpu_decoded_bc);
+
+/* Phase 11: real AC lap timer, tested UI helpers, memory footprint. */
+int  ac_ios_lap_state(ACIosLapState *out);
+int  ac_ios_format_lap_ms(uint32_t ms, char *buf, size_t cap);
+int64_t ac_ios_lap_delta_ms(uint32_t lap_ms, uint32_t best_ms);
+int  ac_ios_should_accept_pb(uint32_t candidate_ms, uint32_t valid, int32_t cuts, uint32_t best_ms);
+uint32_t ac_ios_fps_cap_for_index(int index);
+int  ac_ios_fps_index_for_cap(uint32_t cap);
+uint32_t ac_ios_thermal_cap(uint32_t user_cap, int thermal_state);
+uint64_t ac_ios_memory_footprint(void);
 void *ac_ios_metal_layer(void);
 void ac_ios_set_metal_layer(void *layer);   /* pass NULL on view teardown */
 #ifdef __OBJC__
