@@ -288,9 +288,13 @@ int ac_ios_lap_state(ACIosLapState *out) {
 }
 
 uint64_t ac_ios_memory_footprint(void) {
-    mach_task_basic_info_data_t info;
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+    // mach_task_basic_info has no phys_footprint on the iOS SDK. task_vm_info
+    // is the public API that reports the same Jetsam footprint (see Rust
+    // meminfo.rs, which uses TASK_VM_INFO_REV5).
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    memset(&info, 0, sizeof(info));
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
         return 0;
     }
     return (uint64_t)info.phys_footprint;
