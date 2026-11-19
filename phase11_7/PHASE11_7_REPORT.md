@@ -106,6 +106,14 @@ the iPhone**. Real-device validation: **NOT CONFIRMED**.
 
 ## Build / artifacts
 
-- Checkpoint before: `checkpoint/before_phase11_7/`
+- Commit `a609e93` (feature), CI `44569542332` — **SUCCESS** on `macos-26-intel`.
+- IPA: `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-Prot-unsigned.ipa`
+  - Size **4,358,287 B**, SHA-256
+    `472307943e670eadb61666f77334320c4f4fb110de5864fbbac0e945ac0ea928`
+  - audit: `UNSIGNED IPA STRUCTURALLY VALID`
+- Previous Phase 11 build preserved as
+  `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa` (`d34ca0cf…`).
+- Updated local Content Pack:
+  `D:\opencode-sandbox\ac-ios-port\content_pack\content` (8 cars, 3 tracks).
+- Checkpoint before: `checkpoint/before_phase11_7/`; after: `checkpoint/after_phase11_7/`
 - Patch: `patches/phase11_7/`
-- Commit / CI / IPA: filled in after CI.

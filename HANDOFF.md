@@ -1,4 +1,4 @@
-# HANDOFF — Assetto Corsa iOS Port (Phase 11 Mobile Experience)
+# HANDOFF — Assetto Corsa iOS Port (Phase 11.7 Functional UI + Content)
 
 ## ГДЕ ВСЁ НАХОДИТСЯ
 
@@ -119,6 +119,26 @@ AC-сцену, машина едет, телеметрия/камеры рабо
   BUILD FIX: `phys_footprint` взят из `task_vm_info` (не `mach_task_basic_info`).
 - **REAL DEVICE VALIDATION: NOT CONFIRMED** — нужна установка IPA и проверка
   меню/Time Attack/FPS cap/звука. Старая IPA сохранена как PrePhase11 backup.
+
+## PHASE 11.7 — FUNCTIONAL UI + CONTENT
+
+- Все кнопки菜单/настроек/гаража/трасс работают; выбор передаётся в GameSim
+  folder name'ом (одинаковый ID в UI и `ac_pal_bridge_open_session`).
+- Новый `ACImportPopup`: модальный AC-стиль, UIDocumentPicker для папки,
+  валидация `content/cars` + `content/tracks` (или `cars`/`tracks`, в т.ч.
+  AC-iOS подпапка), security-scoped access, копирование файл-за-файлом с
+  прогрессом, состояния Ready/Selected/Importing/Completed/Failed.
+- Контент-пак (LOCAL, git-ignored): +5 машин (ks_nissan_370z, ks_toyota_ae86,
+  ks_ford_gt40, bmw_m3_e92_drift, ks_audi_sport_quattro) + трасса
+  trento-bondone (**Hill Climb, НЕ rally stage**). Итого 8 машин / 3 трассы /
+  837 файлов / ~1.66 GiB. Все DLC присутствовали локально, скачиваний нет.
+- Реальный `full_frame` load: 6/6 OK (5 новых машин @ magione + lotus @ trento).
+- Garage показывает РЕАЛЬНЫЕ имена из ui_car.json и превью из пользовательского
+  контента (84×48, кэш), без загрузки KN5 ради карточек.
+- IPA: CI `44569542332` success, SHA `472307943e…`, 4,358,287 B; старая IPA
+  сохранена как `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa`.
+- **REAL DEVICE VALIDATION: NOT CONFIRMED** — popup/импорт/новый контент нужно
+  проверить на iPhone.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 
