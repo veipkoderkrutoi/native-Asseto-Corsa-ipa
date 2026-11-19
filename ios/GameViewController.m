@@ -261,6 +261,12 @@
 @property (nonatomic, strong) UILabel *menuInfo;
 @property (nonatomic, strong) UIButton *debugToggleButton;
 @property (nonatomic, strong) UIButton *centerToggleButton;
+@property (nonatomic, strong) UISlider *masterSlider;
+@property (nonatomic, strong) UISlider *engineSlider;
+@property (nonatomic, strong) UISlider *effectsSlider;
+@property (nonatomic, strong) ACRoundButton *muteButton;
+@property (nonatomic, strong) UILabel *audioInfoLabel;
+@property (nonatomic, assign) BOOL audioMuted;
 @property (nonatomic, assign) BOOL showCarsInMenu;
 @property (nonatomic, assign) BOOL debugEnabled;
 @property (nonatomic, assign) BOOL returnToCenter;
@@ -379,6 +385,11 @@
     self.menuInfo.frame = self.menuTable.frame;
     self.debugToggleButton.frame = CGRectMake(x, listY + 4.0, pw - 20.0, 30.0);
     self.centerToggleButton.frame = CGRectMake(x, listY + 40.0, pw - 20.0, 30.0);
+    self.masterSlider.frame = CGRectMake(x, listY + 82.0, pw - 90.0, 24.0);
+    self.engineSlider.frame = CGRectMake(x, listY + 110.0, pw - 90.0, 24.0);
+    self.effectsSlider.frame = CGRectMake(x, listY + 138.0, pw - 90.0, 24.0);
+    self.muteButton.frame = CGRectMake(pw - 76.0, listY + 82.0, 60.0, 30.0);
+    self.audioInfoLabel.frame = CGRectMake(x, listY + 170.0, pw - 20.0, 60.0);
 
     // HUD at the top centre: clear of the left menu and the right buttons.
     CGFloat hw = 190.0;
@@ -421,6 +432,7 @@
 
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
+    ac_ios_audio_shutdown();
     ac_ios_render_destroy();
     ac_ios_metal_destroy();
     ac_pal_bridge_shutdown();
@@ -483,6 +495,37 @@
                       forControlEvents:UIControlEventTouchUpInside];
     self.centerToggleButton.hidden = YES;
     [self.menuPanel addSubview:self.centerToggleButton];
+
+    // Audio settings. Values are published to the audio engine through FFI;
+    // no audio work happens on the main thread beyond these small setters.
+    self.masterSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+    self.masterSlider.minimumValue = 0.0f; self.masterSlider.maximumValue = 1.0f;
+    self.masterSlider.value = 0.8f;
+    [self.masterSlider addTarget:self action:@selector(volumeChanged:)
+                forControlEvents:UIControlEventValueChanged];
+    self.engineSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+    self.engineSlider.minimumValue = 0.0f; self.engineSlider.maximumValue = 1.0f;
+    self.engineSlider.value = 0.9f;
+    [self.engineSlider addTarget:self action:@selector(volumeChanged:)
+                forControlEvents:UIControlEventValueChanged];
+    self.effectsSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+    self.effectsSlider.minimumValue = 0.0f; self.effectsSlider.maximumValue = 1.0f;
+    self.effectsSlider.value = 0.7f;
+    [self.effectsSlider addTarget:self action:@selector(volumeChanged:)
+                forControlEvents:UIControlEventValueChanged];
+    self.muteButton = [[ACRoundButton alloc] initWithTitle:@"Audio: ON" accent:NO];
+    [self.muteButton addTarget:self action:@selector(muteTapped)
+              forControlEvents:UIControlEventTouchUpInside];
+    self.audioInfoLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.audioInfoLabel.numberOfLines = 0;
+    self.audioInfoLabel.font = [UIFont systemFontOfSize:9.0];
+    self.audioInfoLabel.textColor = [UIColor colorWithWhite:0.68 alpha:1.0];
+    self.audioInfoLabel.text = @"Audio: diagnostic synth (not original AC FMOD banks)";
+    for (UIView *v in @[self.masterSlider, self.engineSlider, self.effectsSlider,
+                        self.muteButton, self.audioInfoLabel]) {
+        v.hidden = YES;
+        [self.menuPanel addSubview:v];
+    }
 }
 
 - (void)buildHUD {
@@ -596,6 +639,8 @@
     self.menuInfo.hidden = NO;
     self.debugToggleButton.hidden = YES;
     self.centerToggleButton.hidden = YES;
+    self.masterSlider.hidden = self.engineSlider.hidden = self.effectsSlider.hidden = YES;
+    self.muteButton.hidden = self.audioInfoLabel.hidden = YES;
     self.menuInfo.text =
         @"DRIVING\n"
         "Wheel — drag left/right to steer, release to centre.\n"
@@ -613,6 +658,23 @@
     self.menuInfo.hidden = YES;
     self.debugToggleButton.hidden = NO;
     self.centerToggleButton.hidden = NO;
+    self.masterSlider.hidden = NO;
+    self.engineSlider.hidden = NO;
+    self.effectsSlider.hidden = NO;
+    self.muteButton.hidden = NO;
+    self.audioInfoLabel.hidden = NO;
+}
+
+- (void)volumeChanged:(UISlider *)sender {
+    ac_ios_audio_set_volumes(self.masterSlider.value, self.engineSlider.value,
+                             self.effectsSlider.value);
+}
+
+- (void)muteTapped {
+    self.audioMuted = !self.audioMuted;
+    ac_ios_audio_set_mute(self.audioMuted ? 1 : 0);
+    [self.muteButton setTitle:(self.audioMuted ? @"Audio: OFF" : @"Audio: ON")
+                     forState:UIControlStateNormal];
 }
 
 - (void)debugToggled {
@@ -717,6 +779,17 @@
         return;
     }
     self.renderReady = YES;
+    // Audio is independent of graphics: a failure here must not stop the game.
+    char audioErr[256] = {0};
+    if (ac_ios_audio_init(audioErr, sizeof(audioErr)) != 0) {
+        NSLog(@"ac_ios_audio: init failed (game continues): %s", audioErr);
+        self.audioInfoLabel.text = [NSString stringWithFormat:@"Audio unavailable: %s", audioErr];
+    } else {
+        self.audioInfoLabel.text = @"Audio: diagnostic synth (not original AC FMOD banks)";
+        ac_ios_audio_set_volumes(self.masterSlider.value, self.engineSlider.value,
+                                 self.effectsSlider.value);
+        ac_ios_audio_set_mute(self.audioMuted ? 1 : 0);
+    }
     self.messageLabel.hidden = YES;
     // Drive closes the menu; MENU reopens it without touching the session.
     self.menuPanel.hidden = YES;
@@ -827,7 +900,8 @@
     float steer = snapshot[5];
     float steps = snapshot[6];
     float trackLoaded = snapshot[7];
-    ac_ios_audio_set(rpm, gas);
+    // Real telemetry -> diagnostic audio (no timers, no invented engine state).
+    ac_ios_audio_set_state(rpm, gas, brake, speed, gear);
 
     // HUD: only three small labels, throttled to 10 Hz to avoid allocations.
     if (++self.telemetryFrame % 6 == 0) {
@@ -835,6 +909,10 @@
         self.hudRpm.text = [NSString stringWithFormat:@"%.0f rpm", rpm];
         self.hudGear.text = gear < 0.5f ? @"N" : [NSString stringWithFormat:@"%.0f", gear];
         if (self.debugEnabled) {
+            char audioStatus[256] = {0};
+            ac_ios_audio_status(audioStatus, sizeof(audioStatus));
+            uint64_t texLoaded = 0, texFailed = 0, texCpu = 0;
+            ac_ios_texture_stats(&texLoaded, &texFailed, &texCpu);
             self.debugLabel.text = [NSString stringWithFormat:
                 @"REAL AC SESSION: %@\n"
                 "Scene: %@\n"
@@ -843,16 +921,21 @@
                 "FPS: %.1f\n"
                 "Render: %.2f ms\n"
                 "Metal features: 0x%llx\n"
+                "Textures ok/err/CPU: %llu/%llu/%llu\n"
                 "gas %.2f brake %.2f\n"
-                "steer %.2f (%@)",
+                "steer %.2f (%@)\n"
+                "audio: %s",
                 self.sessionOpen ? @"yes" : @"NO",
                 self.renderReady ? @"loaded" : @"none",
                 trackLoaded > 0.5 ? @"loaded" : @"none",
                 steps, self.smoothedFps,
                 ac_ios_render_last_draw_ms(),
                 self.metalFeatures,
+                (unsigned long long)texLoaded, (unsigned long long)texFailed,
+                (unsigned long long)texCpu,
                 gas, brake, steer,
-                steer > 0.02f ? @"right" : (steer < -0.02f ? @"left" : @"centre")];
+                steer > 0.02f ? @"right" : (steer < -0.02f ? @"left" : @"centre"),
+                audioStatus];
         }
     }
 

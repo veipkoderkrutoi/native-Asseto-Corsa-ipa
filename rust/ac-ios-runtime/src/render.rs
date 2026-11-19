@@ -270,6 +270,17 @@ pub extern "C" fn ac_ios_render_resize(width: u32, height: u32) -> c_int {
     })
 }
 
+/// Original AC texture load counts for the optional diagnostics panel.
+/// These are cumulative for the current process; no per-frame logging.
+#[no_mangle]
+pub extern "C" fn ac_ios_texture_stats(loaded: *mut u64, failed: *mut u64, cpu_decoded_bc: *mut u64) {
+    use std::sync::atomic::Ordering;
+    let s = &rustyac_render::texture::TEXTURE_STATS;
+    if !loaded.is_null() { unsafe { *loaded = s.loaded.load(Ordering::Relaxed) } }
+    if !failed.is_null() { unsafe { *failed = s.failed.load(Ordering::Relaxed) } }
+    if !cpu_decoded_bc.is_null() { unsafe { *cpu_decoded_bc = s.cpu_decoded_bc.load(Ordering::Relaxed) } }
+}
+
 /// Cycles AC's own cameras exactly like the game's F1 key.
 ///
 /// `next_drivable()` only walks chase/chase2/bonnet/bumper/dash and therefore

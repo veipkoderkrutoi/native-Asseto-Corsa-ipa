@@ -26,6 +26,17 @@ int  ac_ios_input_state(ACIosInputState *out);
 int  ac_ios_audio_set(float rpm, float load);
 void ac_ios_audio_suspend(void);
 void ac_ios_audio_resume(void);
+
+/* Diagnostic gameplay audio. This is a SYNTHESIZED engine/road sound driven by
+ * real GameSim telemetry — NOT playback of original AC FMOD banks (no FMOD iOS
+ * SDK is available). Kept strictly separate from any original asset playback. */
+int  ac_ios_audio_init(char *err, size_t cap);
+void ac_ios_audio_shutdown(void);
+void ac_ios_audio_set_state(float rpm, float throttle, float brake, float speed, float gear);
+void ac_ios_audio_set_volumes(float master, float engine, float effects);
+void ac_ios_audio_set_mute(int muted);
+int  ac_ios_audio_status(char *buf, size_t cap);
+void ac_ios_texture_stats(uint64_t *loaded, uint64_t *failed, uint64_t *cpu_decoded_bc);
 void *ac_ios_metal_layer(void);
 void ac_ios_set_metal_layer(void *layer);   /* pass NULL on view teardown */
 #ifdef __OBJC__

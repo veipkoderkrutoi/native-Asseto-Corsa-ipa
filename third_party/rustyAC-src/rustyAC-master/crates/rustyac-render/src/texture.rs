@@ -104,6 +104,28 @@ pub fn d3dx_available() -> bool {
 
 static FORCE_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Texture loading counters (bounded: four integers, no per-frame logging).
+/// Exposed through ac-ios-runtime so the optional diagnostics panel can show
+/// how many original AC textures actually reached the GPU.
+pub static TEXTURE_STATS: TextureStats = TextureStats {
+    loaded: std::sync::atomic::AtomicU64::new(0),
+    failed: std::sync::atomic::AtomicU64::new(0),
+    cpu_decoded_bc: std::sync::atomic::AtomicU64::new(0),
+};
+
+pub struct TextureStats {
+    pub loaded: std::sync::atomic::AtomicU64,
+    pub failed: std::sync::atomic::AtomicU64,
+    pub cpu_decoded_bc: std::sync::atomic::AtomicU64,
+}
+
+#[inline]
+pub fn note_texture_loaded() { TEXTURE_STATS.loaded.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+#[inline]
+pub fn note_texture_failed() { TEXTURE_STATS.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+#[inline]
+pub fn note_texture_cpu_decoded() { TEXTURE_STATS.cpu_decoded_bc.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+
 /// Use the fallback reader even when D3DX is installed (to measure the difference).
 pub fn force_fallback(on: bool) {
     FORCE_FALLBACK.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -126,8 +148,14 @@ impl KglTexture {
     pub fn from_file_bytes(kgl: &Kgl, bytes: &[u8]) -> KglTexture {
         let mut texture = KglTexture { shader_resource_view: None, width: 0, height: 0 };
         match crate::texture_fallback::create(kgl, bytes) {
-            Ok(view) => texture.shader_resource_view = Some(view),
-            Err(message) => println!("ERROR: texture not readable without d3dx11_43.dll: {message}"),
+            Ok(view) => {
+                texture.shader_resource_view = Some(view);
+                note_texture_loaded();
+            }
+            Err(message) => {
+                note_texture_failed();
+                println!("ERROR: texture not readable without d3dx11_43.dll: {message}");
+            }
         }
         texture.init_size();
         texture
@@ -138,6 +166,7 @@ impl KglTexture {
         match rustyac_content::vfs::read(path) {
             Ok(bytes) => KglTexture::from_file_bytes(kgl, &bytes),
             Err(e) => {
+                note_texture_failed();
                 println!("ERROR: texture {} not readable without d3dx11_43.dll: {e}", path.display());
                 KglTexture { shader_resource_view: None, width: 0, height: 0 }
             }

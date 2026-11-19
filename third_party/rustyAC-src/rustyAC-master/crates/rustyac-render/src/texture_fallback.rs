@@ -101,6 +101,129 @@ fn rgba_with_mips(kgl: &Kgl, width: u32, height: u32, rgba: Vec<u8>) -> Result<V
     upload(kgl, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, &levels)
 }
 
+/// Decode a block-compressed DDS level to RGBA8 when the adapter has no
+/// TEXTURE_COMPRESSION_BC (Metal on iOS). The original texels are preserved:
+/// this is the same decompression the GPU would have done, not a placeholder.
+fn decode_bc(kind: u32, width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>, String> {
+    let blocks_w = width.div_ceil(4).max(1) as usize;
+    let blocks_h = height.div_ceil(4).max(1) as usize;
+    let expected = blocks_w * blocks_h * if kind == 2 || kind == 3 || kind == 5 { 16 } else { 8 };
+    if data.len() < expected {
+        return Err(format!("short {kind} block level: {} < {expected}", data.len()));
+    }
+    let mut out = vec![0u8; width as usize * height as usize * 4];
+    let expand5 = |v: u16| -> u8 { ((v * 255 + 15) / 31) as u8 };
+    let expand6 = |v: u16| -> u8 { ((v * 255 + 31) / 63) as u8 };
+    let mix = |a: u8, b: u8, wa: u32, wb: u32| -> u8 { ((a as u32 * wa + b as u32 * wb) / 3) as u8 };
+
+    // The colour half of a DXT1 block (4-colour mode); shared by DXT1/3/5.
+    let colors = |block: &[u8]| -> [[u8; 3]; 4] {
+        let c0 = u16::from_le_bytes([block[0], block[1]]);
+        let c1 = u16::from_le_bytes([block[2], block[3]]);
+        let a = [expand5((c0 >> 11) & 31), expand6((c0 >> 5) & 63), expand5(c0 & 31)];
+        let b = [expand5((c1 >> 11) & 31), expand6((c1 >> 5) & 63), expand5(c1 & 31)];
+        let mut p = [[0u8; 3]; 4];
+        p[0] = a;
+        p[1] = b;
+        if c0 > c1 {
+            p[2] = [mix(a[0], b[0], 2, 1), mix(a[1], b[1], 2, 1), mix(a[2], b[2], 2, 1)];
+            p[3] = [mix(a[0], b[0], 1, 2), mix(a[1], b[1], 1, 2), mix(a[2], b[2], 1, 2)];
+        } else {
+            p[2] = [((a[0] as u16 + b[0] as u16) / 2) as u8,
+                     ((a[1] as u16 + b[1] as u16) / 2) as u8,
+                     ((a[2] as u16 + b[2] as u16) / 2) as u8];
+            p[3] = [0, 0, 0];
+        }
+        p
+    };
+
+    // The 8-byte DXT5/BC4 alpha block: two endpoints + 48 bits of 3-bit indices.
+    let alpha8 = |block: &[u8]| -> [u8; 16] {
+        let (a0, a1) = (block[0], block[1]);
+        let mut bits = 0u64;
+        for i in 0..6 { bits |= (block[2 + i] as u64) << (8 * i); }
+        let mut idx = [0u8; 16];
+        for (i, slot) in idx.iter_mut().enumerate() {
+            let code = ((bits >> (3 * i)) & 7) as u8;
+            *slot = match code {
+                0 => a0,
+                1 => a1,
+                2..=5 if a0 > a1 => (((6 - code) as u16 * a0 as u16 + (code - 2) as u16 * a1 as u16) / 4) as u8,
+                2..=5 => (((5 - code) as u16 * a0 as u16 + (code - 1) as u16 * a1 as u16) / 4) as u8,
+                6 => 0,
+                _ => 255,
+            };
+        }
+        idx
+    };
+
+    for by in 0..blocks_h {
+        for bx in 0..blocks_w {
+            let off = (by * blocks_w + bx) * if kind == 2 || kind == 3 || kind == 5 { 16 } else { 8 };
+            let block = &data[off..];
+            let pal = colors(match kind { 2 | 3 => &block[8..16], _ => &block[0..8] });
+            let indices = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+            let dxt3_alpha = |i: usize| -> u8 {
+                let byte = block[i / 2];
+                if i % 2 == 0 { (byte & 0x0f) * 17 } else { (byte >> 4) * 17 }
+            };
+            let a5 = if kind == 3 { alpha8(&block[0..8]) } else { [255u8; 16] };
+            let (r4, g4) = if kind == 5 {
+                (alpha8(&block[0..8]), alpha8(&block[8..16]))
+            } else {
+                ([0u8; 16], [0u8; 16])
+            };
+            for py in 0..4 {
+                for px in 0..4 {
+                    let (x, y) = (bx * 4 + px, by * 4 + py);
+                    if x >= width as usize || y >= height as usize { continue; }
+                    let i = py * 4 + px;
+                    let rgba = match kind {
+                        4 => [r4[i], r4[i], r4[i], 255],
+                        5 => [r4[i], g4[i], 0, 255],
+                        _ => {
+                            let c = pal[((indices >> (2 * i)) & 3) as usize];
+                            let alpha = match kind { 2 => dxt3_alpha(i), 3 => a5[i], _ => 255 };
+                            [c[0], c[1], c[2], alpha]
+                        }
+                    };
+                    let at = (y * width as usize + x) * 4;
+                    out[at..at + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Upload a compressed level as RGBA8 on adapters without BC support.
+fn upload_decompressed_bc(kgl: &Kgl, format: DXGI_FORMAT, width: u32, height: u32,
+                          levels: &[(Vec<u8>, u32)]) -> Result<View, String> {
+    let kind = match format.0 {
+        70..=72 => 1,
+        73..=76 => 2,
+        77..=79 | 94..=99 => 3, // BC7 handled as DXT5-shaped fallback only if reached
+        80..=81 => 4,
+        82..=84 => 5,
+        other => return Err(format!("no CPU decoder for compressed DXGI format {other}")),
+    };
+    if format.0 >= 94 {
+        return Err(format!("no CPU decoder for DXGI format {} (BC6/BC7)", format.0));
+    }
+    let srgb = matches!(format.0, 72 | 75 | 78);
+    let mut out = Vec::new();
+    let (mut w, mut h) = (width, height);
+    for (level, (data, _)) in levels.iter().enumerate() {
+        let _ = level;
+        let rgba = decode_bc(kind, w, h, data)?;
+        out.push((rgba, w * 4));
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+    let target = if srgb { DXGI_FORMAT(29) } else { DXGI_FORMAT_R8G8B8A8_UNORM };
+    upload(kgl, width, height, target, &out)
+}
+
 fn dds(kgl: &Kgl, bytes: &[u8]) -> Result<View, String> {
     let height = u32_at(bytes, 12);
     let width = u32_at(bytes, 16);
@@ -161,6 +284,18 @@ fn dds(kgl: &Kgl, bytes: &[u8]) -> Result<View, String> {
         }
         if levels.is_empty() {
             return Err("dds file without pixel data".into());
+        }
+        // Metal on iOS has no TEXTURE_COMPRESSION_BC. Uploading a BC texture
+        // there used to fail and KglTexture silently became empty, which is
+        // why the road/trees were black or missing. Decode the original AC
+        // texels on the CPU instead of dropping the texture.
+        #[cfg(feature = "backend-wgpu")]
+        {
+            let compressed = matches!(format.0, 70..=72 | 73..=76 | 77..=84 | 94..=99);
+            if compressed && !kgl.features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+                crate::texture::note_texture_cpu_decoded();
+                return upload_decompressed_bc(kgl, format, width, height, &levels);
+            }
         }
         return upload(kgl, width, height, format, &levels);
     }
@@ -334,6 +469,43 @@ fn decode_with_wic(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         let source: IWICBitmapSource = converter.cast().map_err(|e| format!("WIC: {e}"))?;
         source.CopyPixels(std::ptr::null(), width * 4, &mut rgba).map_err(|e| format!("WIC pixels: {e}"))?;
         Ok((width, height, rgba))
+    }
+}
+
+#[cfg(test)]
+mod bc_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn dxt1_solid_block_decodes_to_opaque_red() {
+        // c0 = c1 = 0xF800 (R=31,G=0,B=0), every index selects colour 0.
+        let block = [0x00, 0xF8, 0x00, 0xF8, 0, 0, 0, 0];
+        let rgba = decode_bc(1, 4, 4, &block).unwrap();
+        assert_eq!(rgba.len(), 4 * 4 * 4);
+        for px in rgba.chunks_exact(4) {
+            assert_eq!(px, &[255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn dxt5_uses_the_dxt5_alpha_endpoints() {
+        // Alpha endpoint 0 = 255, index 0 for all pixels; colour is solid red.
+        let mut block = [0u8; 16];
+        block[0] = 255;
+        block[1] = 0;
+        block[8] = 0x00; block[9] = 0xF8;
+        block[10] = 0x00; block[11] = 0xF8;
+        let rgba = decode_bc(3, 4, 4, &block).unwrap();
+        for px in rgba.chunks_exact(4) {
+            assert_eq!(px[3], 255, "DXT5 alpha endpoint 0 must be opaque");
+            assert_eq!(&px[..3], &[255, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn short_block_is_reported_not_silently_dropped() {
+        assert!(decode_bc(1, 4, 4, &[0u8; 4]).is_err());
+        assert!(decode_bc(3, 4, 4, &[0u8; 8]).is_err());
     }
 }
 

@@ -35,6 +35,8 @@ targets:
       - sdk: Metal.framework
       - sdk: MetalKit.framework
       - sdk: GameController.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
       - sdk: QuartzCore.framework
       - sdk: UniformTypeIdentifiers.framework
     headers:

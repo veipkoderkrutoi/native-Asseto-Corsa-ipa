@@ -1,4 +1,4 @@
-# HANDOFF — Assetto Corsa iOS Port (NEXT PHASE: UX/Controls)
+# HANDOFF — Assetto Corsa iOS Port (Phase 9 Glow Up)
 
 ## ГДЕ ВСЁ НАХОДИТСЯ
 
@@ -59,6 +59,26 @@ AC-сцену, машина едет, телеметрия/камеры рабо
 - Отчёт `phase9/NEXT_PHASE_REPORT.md`, патч `patches/next_phase/`,
   чекпоинты `checkpoint/before_next_phase/`, `checkpoint/after_next_phase/`.
 - **Новый UI на iPhone ещё не проверен** — нужно поставить новую IPA.
+
+## PHASE 9 GLOW UP — сделано локально
+
+- ГРАФИКА: на iOS Metal нет `TEXTURE_COMPRESSION_BC`; `kgl_wgpu.rs::create_texture`
+  возвращал ошибку, а `texture.rs` молча давал пустую текстуру → чёрная земля и
+ _missing trees_. Добавлен CPU-декодер DXT1/3/5 (и BC4/5) в `texture_fallback.rs`
+  с загрузкой оригинальных texels как RGBA8/RGBA8-SRGB. Счётчики
+  `TEXTURE_STATS` + FFI `ac_ios_texture_stats`.
+- АУДИО: FMOD-банки есть в контенте, но FMOD iOS SDK недоступен — **не заявляем**
+  original audio. Реализован AVAudioEngine + AVAudioSourceNode с синтезированным
+  звуком, управляемым РЕАЛЬНОЙ телеметрией (rpm/throttle/brake/speed/gear),
+  atomic FFI, громкость/mute, interruption/background handling. Всё помечено
+  как diagnostic synth.
+- UI: слайдеры master/engine/effects + mute в Settings; диагностика показывает
+  audio status и texture counters. `project.yml` линкует AVFoundation/AudioToolbox.
+- Тесты: 42 lib (40 pass, 2 ignored), iOS cargo check PASS, verify 52/52,
+  prepush PASS. Отчёт `phase9/PHASE9_GLOWUP_REPORT.md`, патч
+  `patches/phase9_glowup/`, чекпоинт `checkpoint/before_phase9/` и `after_phase9_glowup/`.
+- **Новая IPA ещё не проверена на iPhone** — аудио/графику нужно слушать/смотреть
+  после установки.
 
 ## ПРАВИЛО ИЗ ИСТОЧНИКОВ wgpu 30.0.1 (не последней версии!)
 
