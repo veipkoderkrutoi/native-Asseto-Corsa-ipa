@@ -16,10 +16,10 @@ Native ARM64 build for iPhone 13 Pro Max (iOS 16+).
 ## Artifact
 
 - File: `AC-iOS-Prot-unsigned.ipa`
-- Size: 4,358,164 bytes
-- SHA-256: `e7b16ae0b79c7f4bec87735ba59333f167d2ba9a2d28deb376541783181534f0`
+- Size: 4,359,044 bytes
+- SHA-256: `0546201c9bca33084a6c8095258ac8edfd0c55cd7a0a3a46a7375d3190ea4171`
 - Structurally verified unsigned IPA; re-sign with Sideloadly before installing.
-- Commit: `179adc3`, CI run `44597749846` (`macos-26-intel`, success).
+- Commit: `f8aa63c`, CI run `44600565798` (`macos-26-intel`, success).
 - This build fixes the main-menu buttons: all screen containers now receive a
   real frame, so UIKit hit-testing reaches every button.
 
@@ -32,7 +32,11 @@ for a complete, reproducible guide (exact folder names, whole-folder copy,
 manifest update, real-engine verification and transfer archive creation).
 
 On iPhone: CONTENT → CHOOSE FOLDER → select the unpacked `content_pack` folder
-(it must contain `content/cars` and `content/tracks`), or directly your AC root.
+(it must contain `content/cars`, `content/tracks` **and `system/shaders/win`**),
+or directly your AC root. A pack without `system/shaders/win` will fail with
+`the shader kssky is not in .../system/shaders/win`; the importer now rejects
+such folders with a clear message instead of letting the renderer fail.
+The corrected transfer archive is named `content_pack_transfer_phase11_7_fixed.zip`.
 
 ## Known limitations
 

@@ -123,10 +123,10 @@ Fixed:
 
 ## Build / artifacts
 
-- Commit `179adc3` (feature), CI `44597749846` — **SUCCESS** on `macos-26-intel`.
+- Commit `f8aa63c` (feature), CI `44600565798` — **SUCCESS** on `macos-26-intel`.
 - IPA: `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-Prot-unsigned.ipa`
-  - Size **4,358,164 B**, SHA-256
-    `e7b16ae0b79c7f4bec87735ba59333f167d2ba9a2d28deb376541783181534f0`
+  - Size **4,359,044 B**, SHA-256
+    `0546201c9bca33084a6c8095258ac8edfd0c55cd7a0a3a46a7375d3190ea4171`
   - audit: `UNSIGNED IPA STRUCTURALLY VALID`
 - Previous Phase 11 build preserved as
   `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa` (`d34ca0cf…`).
