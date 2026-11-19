@@ -622,6 +622,15 @@
     CGFloat w = self.view.bounds.size.width;
     CGFloat h = self.view.bounds.size.height;
     self.menuContainer.frame = self.view.bounds;
+    // Critical: every screen container must have a real frame. With a zero
+    // frame UIKit draws subviews but hit-testing rejects every touch, so all
+    // menu buttons appeared clickable but did nothing.
+    CGRect screenFrame = self.menuContainer.bounds;
+    self.homeView.frame = screenFrame;
+    self.garageView.frame = screenFrame;
+    self.tracksView.frame = screenFrame;
+    self.modesView.frame = screenFrame;
+    self.settingsView.frame = screenFrame;
 
     // Home
     CGFloat cx = w / 2;
