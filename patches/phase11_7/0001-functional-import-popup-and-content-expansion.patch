@@ -1,0 +1,197 @@
+﻿diff --git a/ios/GameViewController.m b/ios/GameViewController.m
+index 724b4f4..30cfd85 100644
+--- a/ios/GameViewController.m
++++ b/ios/GameViewController.m
+@@ -11,6 +11,7 @@
+ #import "ac_pal_bridge.h"
+ #import "ACSettings.h"
+ #import "ACTiming.h"
++#import "ACImportPopup.h"
+ #import <math.h>
+ #import <QuartzCore/QuartzCore.h>
+ 
+@@ -225,6 +226,9 @@
+ @property (nonatomic, strong) MTKView *metalView;
+ @property (nonatomic, strong) ACSettings *settings;
+ @property (nonatomic, strong) ACTiming *timing;
++@property (nonatomic, strong) ACImportPopup *importPopup;
++@property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *thumbnailCache;
++@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *displayNameCache;
+ 
+ // Screens
+ @property (nonatomic, strong) UIView *menuContainer;
+@@ -311,6 +315,8 @@
+     self.view.backgroundColor = [UIColor colorWithWhite:0.04 alpha:1.0];
+     self.settings = ACSettings.shared;
+     self.timing = [[ACTiming alloc] init];
++    self.thumbnailCache = [NSMutableDictionary dictionary];
++    self.displayNameCache = [NSMutableDictionary dictionary];
+     self.thermalState = NSProcessInfo.processInfo.thermalState;
+ 
+     self.metalView = [[MTKView alloc] initWithFrame:CGRectZero device:MTLCreateSystemDefaultDevice()];
+@@ -781,8 +787,8 @@
+ }
+ 
+ - (void)updateHome {
+-    self.homeCar.text = self.settings.selectedCar ?: @"тАФ";
+-    self.homeTrack.text = self.settings.selectedTrack ?: @"тАФ";
++    self.homeCar.text = self.settings.selectedCar.length ? [self displayNameForCar:self.settings.selectedCar] : @"тАФ";
++    self.homeTrack.text = self.settings.selectedTrack.length ? [self displayNameForTrack:self.settings.selectedTrack] : @"тАФ";
+     uint32_t best = [self.settings bestMsForCar:self.settings.selectedCar track:self.settings.selectedTrack];
+     self.homeBest.text = best ? [NSString stringWithFormat:@"BEST  %@", [ACTiming formatMs:best]] : @"BEST  --:--.---";
+     NSArray *modeNames = @[@"PRACTICE", @"TIME ATTACK", @"HOTLAP", @"FREE DRIVE"];
+@@ -882,13 +888,34 @@
+ 
+ - (void)acRootChanged:(NSNotification *)note {
+     self.acRootURL = note.object;
++    [self.thumbnailCache removeAllObjects];
++    [self.displayNameCache removeAllObjects];
+     [self scanContent];
+     [self showMessage:@"AC folder changed тАФ press DRIVE for a new session"];
+ }
+ 
+ - (void)chooseFolderTapped {
+-    AppDelegate *app = (AppDelegate *)UIApplication.sharedApplication.delegate;
+-    [app chooseACRootFrom:self];
++    if (self.importPopup) return;
++    __weak typeof(self) weakSelf = self;
++    self.importPopup = [[ACImportPopup alloc] initWithPresenter:self
++        completion:^(NSURL *root, NSUInteger cars, NSUInteger tracks, NSError *error) {
++            __strong typeof(weakSelf) self = weakSelf;
++            if (!self) return;
++            if (error || !root) {
++                if (error) [self showMessage:error.localizedDescription];
++            } else {
++                self.acRootURL = root;
++                AppDelegate *app = (AppDelegate *)UIApplication.sharedApplication.delegate;
++                app.acRootURL = root;
++                [self.thumbnailCache removeAllObjects];
++                [self.displayNameCache removeAllObjects];
++                [self scanContent];
++                [self showMessage:[NSString stringWithFormat:@"Imported %lu cars / %lu tracks",
++                                   (unsigned long)cars, (unsigned long)tracks]];
++            }
++            self.importPopup = nil;
++        }];
++    [self.importPopup showInView:self.view];
+ }
+ 
+ - (void)confirmCar { [self showHome]; }
+@@ -1103,6 +1130,81 @@
+     [self.view bringSubviewToFront:self.messageLabel];
+ }
+ 
++#pragma mark - Content metadata / thumbnails
++
++/// AC's ui_car.json contains raw newlines inside strings, so strict JSON
++/// parsing fails. A bounded regex over the small text file gets real values.
++- (NSString *)valueForKey:(NSString *)key inJSONAtPath:(NSString *)path fallback:(NSString *)fallback {
++    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
++    if (!text) return fallback;
++    NSString *pattern = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"([^\"]+)\"", key];
++    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
++    NSTextCheckingResult *m = [re firstMatchInString:text options:0 range:NSMakeRange(0, text.length)];
++    if (m && m.numberOfRanges > 1) {
++        return [text substringWithRange:[m rangeAtIndex:1]];
++    }
++    return fallback;
++}
++
++- (NSString *)displayNameForCar:(NSString *)folder {
++    NSString *cached = self.displayNameCache[folder];
++    if (cached) return cached;
++    NSString *json = [self.acRootURL.path stringByAppendingPathComponent:
++                      [NSString stringWithFormat:@"content/cars/%@/ui/ui_car.json", folder]];
++    NSString *name = [self valueForKey:@"name" inJSONAtPath:json fallback:folder];
++    self.displayNameCache[folder] = name;
++    return name;
++}
++
++- (NSString *)displayNameForTrack:(NSString *)folder {
++    NSString *cached = self.displayNameCache[folder];
++    if (cached) return cached;
++    NSString *json = [self.acRootURL.path stringByAppendingPathComponent:
++                      [NSString stringWithFormat:@"content/tracks/%@/ui/ui_track.json", folder]];
++    NSString *name = [self valueForKey:@"name" inJSONAtPath:json fallback:folder];
++    if ([folder isEqualToString:@"trento-bondone"]) {
++        name = [name stringByAppendingString:@" (Hill Climb)"];
++    }
++    self.displayNameCache[folder] = name;
++    return name;
++}
++
++- (UIImage *)thumbnailAtPath:(NSString *)path {
++    UIImage *full = [UIImage imageWithContentsOfFile:path];
++    if (!full) return nil;
++    CGSize target = CGSizeMake(84, 48);
++    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target];
++    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
++        [full drawInRect:CGRectMake(0, 0, target.width, target.height)];
++    }];
++}
++
++- (UIImage *)thumbnailForCar:(NSString *)folder {
++    UIImage *cached = self.thumbnailCache[folder];
++    if (cached) return cached;
++    NSArray *names = @[@"ui/dlc_preview.png", @"ui/preview.png", @"ui/logo.png", @"logo.png"];
++    for (NSString *rel in names) {
++        NSString *path = [self.acRootURL.path stringByAppendingPathComponent:
++                          [NSString stringWithFormat:@"content/cars/%@/%@", folder, rel]];
++        UIImage *img = [self thumbnailAtPath:path];
++        if (img) { self.thumbnailCache[folder] = img; return img; }
++    }
++    return nil;
++}
++
++- (UIImage *)thumbnailForTrack:(NSString *)folder {
++    UIImage *cached = self.thumbnailCache[folder];
++    if (cached) return cached;
++    NSArray *names = @[@"ui/preview.png", @"ui/trento-bondone.png", @"map.png", @"ui/outline.png"];
++    for (NSString *rel in names) {
++        NSString *path = [self.acRootURL.path stringByAppendingPathComponent:
++                          [NSString stringWithFormat:@"content/tracks/%@/%@", folder, rel]];
++        UIImage *img = [self thumbnailAtPath:path];
++        if (img) { self.thumbnailCache[folder] = img; return img; }
++    }
++    return nil;
++}
++
+ #pragma mark - Tables
+ 
+ - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return tv == self.modesTable ? 1 : 1; }
+@@ -1118,12 +1220,18 @@
+     cell.textLabel.font = [UIFont systemFontOfSize:14];
+     NSString *name = nil;
+     BOOL selected = NO;
++    cell.imageView.image = nil;
++    cell.textLabel.textColor = UIColor.whiteColor;
+     if (tv == self.carsTable) {
+-        name = self.cars[ip.row];
+-        selected = [name isEqualToString:self.settings.selectedCar];
++        NSString *folder = self.cars[ip.row];
++        name = [self displayNameForCar:folder];
++        cell.imageView.image = [self thumbnailForCar:folder];
++        selected = [folder isEqualToString:self.settings.selectedCar];
+     } else if (tv == self.tracksTable) {
+-        name = self.tracks[ip.row];
+-        selected = [name isEqualToString:self.settings.selectedTrack];
++        NSString *folder = self.tracks[ip.row];
++        name = [self displayNameForTrack:folder];
++        cell.imageView.image = [self thumbnailForTrack:folder];
++        selected = [folder isEqualToString:self.settings.selectedTrack];
+     } else {
+         NSArray *modes = @[@"PRACTICE", @"TIME ATTACK", @"HOTLAP", @"FREE DRIVE", @"RACE тАФ COMING LATER"];
+         name = modes[ip.row];
+diff --git a/ios/project.yml b/ios/project.yml
+index ea91a1d..b7f34bf 100644
+--- a/ios/project.yml
++++ b/ios/project.yml
+@@ -26,6 +26,8 @@ targets:
+       - path: ACSettings.m
+       - path: ACTiming.h
+       - path: ACTiming.m
++      - path: ACImportPopup.h
++      - path: ACImportPopup.m
+       - path: ios_bridge.m
+       - path: ../core/ac_pal_bridge.c
+       - path: ../core/ac_pal_bridge.h

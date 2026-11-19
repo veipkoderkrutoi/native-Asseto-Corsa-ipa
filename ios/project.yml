@@ -26,6 +26,8 @@ targets:
       - path: ACSettings.m
       - path: ACTiming.h
       - path: ACTiming.m
+      - path: ACImportPopup.h
+      - path: ACImportPopup.m
       - path: ios_bridge.m
       - path: ../core/ac_pal_bridge.c
       - path: ../core/ac_pal_bridge.h
