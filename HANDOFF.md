@@ -1,5 +1,11 @@
 # HANDOFF — Assetto Corsa iOS Port (Phase 11.10 asset repair)
 
+## FULL AC-iOS CONTENT PACK (drop-in)
+
+- `C:\Users\User\Desktop\AC-iOS-content-pack\AC-iOS-full\AC-iOS` — полный пак 1.94 GiB,
+  1864 файла, 8 машин / 3 трассы, 216 шейдеров, 454 required-файла Preflight — 0 missing.
+  Копируется целиком в Documents/AC-iOS, без patch-merge (скрипт `scripts/build_full_ios_pack.py`).
+
 ## PHASE 11.10 — ASSET REPAIR
 
 - Все 39 сообщённых Preflight-файлов есть и в `D:\Games\assettocorsa`, и в локальном
