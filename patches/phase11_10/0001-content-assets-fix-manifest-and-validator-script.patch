@@ -1,0 +1,691 @@
+﻿commit 559cc2adef22813d6a95983b756edc06f3fe3847
+Author: veipkoderkrutoi <veipkoderkrutoi@users.noreply.github.com>
+Date:   Fri Nov 20 15:31:19 2026 +0500
+
+    Phase 11.10: verified missing asset repair, incremental patch and validator script [skip ci]
+
+diff --git a/phase11_10/PHASE11_10_REPORT.md b/phase11_10/PHASE11_10_REPORT.md
+new file mode 100644
+index 0000000..23d047d
+--- /dev/null
++++ b/phase11_10/PHASE11_10_REPORT.md
+@@ -0,0 +1,92 @@
++# Phase 11.10 тАФ Complete missing assets repair
++
++## 1. Inventory audit (39 reported paths)
++
++Every one of the 39 reported resources exists **both** in the original install
++`D:\Games\assettocorsa` and in the local Content Pack. Exact case and directory
++names match; no file was missing from the source game. Full per-path sizes and
++presence are in `phase11_10/inventory_audit.json`.
++
++Two files were absent from **all previous transfer patches** and therefore
++could never have reached the iPhone through them:
++- `content/cars/ks_ford_gt40/animations/car_door_R.ksanim`
++- `content/cars/ks_audi_sport_quattro/animations/car_door_L.ksanim`
++
++The other 37 were present in `content-dependencies-fix.zip` / `driver-fix.zip`;
++the user's device state evidently did not include them (which is exactly what
++Preflight reported). No original file was modified, and no substitute DDS/font/
++animation was created.
++
++## 2. Why the validator reported them (manifest investigation)
++
++All 39 paths are **already** in the Phase 11.9 required union:
++`python` check тЖТ `39 of 39 present in required union`. The manifest was built
++from the real renderer's `full_frame --files` logs, so the dependencies were
++correctly identified; the failure was purely delivery to the device. No
++requirement was downgraded and Preflight validation remains fully enabled.
++`content/driver/driver_60.kn5` and `_B` keep their optional classification
++(the 3D-driver fallback in `driver.rs` is unchanged).
++
++## 3. Per-car results (real file existence checks)
++
++`scripts/phase11_10_validate.py` checks every required path from the Phase 11.9
++manifest for all three tracks:
++
++```text
++PASS ks_toyota_ae86: all required resources present for 3 tracks
++PASS ks_nissan_370z: all required resources present for 3 tracks
++PASS ks_ford_gt40: all required resources present for 3 tracks
++PASS ks_audi_sport_quattro: all required resources present for 3 tracks
++PASS bmw_m3_e92_drift: all required resources present for 3 tracks
++PASS inventory: all 39 reported files present in local pack
++RESULT: PASS
++```
++
++## 4. Real rendering verification (not just existence)
++
++The upstream `full_frame` renderer was run with `AC_ROOT` pointing at the
++**local Content Pack** for all five affected cars on Magione:
++
++```text
++ks_toyota_ae86       exit=0  png=406127 B
++ks_nissan_370z       exit=0  png=414389 B
++ks_ford_gt40         exit=0  png=419194 B
++ks_audi_sport_quattro exit=0 png=402220 B
++bmw_m3_e92_drift     exit=0  png=412767 B
++```
++
++This exercises DDS decoding, font atlases/metadata, KSANIM animations and
++driver textures from the pack. One non-fatal upstream message remains in the
++Nissan log: `ERROR: CANNOT FIND DigitalLed mesh:GEO_LEDS_WATER_0`
++(`rustyac-render/src/digital.rs:881`) тАФ a dashboard mesh reference inside the
++car's own KN5 configuration, not a missing external file; rendering completes
++with exit 0 and a valid PNG. It is documented, not hidden.
++
++## 5. Incremental patch
++
++`C:\Users\User\Desktop\AC-iOS-content-pack\content-assets-fix-11.10.zip`
++
++- Size: **11,467,807 B (10.94 MiB)**
++- SHA-256: **`011d36c13e8cbaea2f4e44c673b3ad4d1e4a24c80de909f729ffd8c128332e87`**
++- 39 unique files + `MANIFEST.json` (relative path, size, SHA-256 per file)
++- No nested `content/content/`, no duplicates, all checksums verified from the ZIP
++- Safe to merge into an existing `Documents/AC-iOS/content`; nothing is deleted
++
++The manifest/checksum list is also at `phase11_10/content_assets_fix_manifest.json`.
++
++## 6. Code changes / IPA
++
++None required: the validator, importer, dependency manifest and Phase 10 memory
++protections already work correctly. The current IPA remains valid
++(SHA `5874bde2c837b70cd60c38beaa1b9c8dd0d664ecc9cbf46bfaa69fde01767f4a`).
++No new IPA was built, per the instruction to build one only if code changes are
++necessary.
++
++## 7. Device validation
++
++The reported failures came from the real iPhone Preflight. The new patch has
++**not yet been applied/tested on the device**:
++
++**REAL DEVICE PREFLIGHT VALIDATION: NOT CONFIRMED.**
++
++After applying the patch, all five cars should show `CONTENT VALIDATION PASSED`.
+diff --git a/phase11_10/content_assets_fix_manifest.json b/phase11_10/content_assets_fix_manifest.json
+new file mode 100644
+index 0000000..c8b6d45
+--- /dev/null
++++ b/phase11_10/content_assets_fix_manifest.json
+@@ -0,0 +1,202 @@
++{
++  "archive": "content-assets-fix-11.10.zip",
++  "size": 11467807,
++  "sha256": "011d36c13e8cbaea2f4e44c673b3ad4d1e4a24c80de909f729ffd8c128332e87",
++  "files": [
++    {
++      "path": "content/cars/ks_audi_sport_quattro/animations/car_door_L.ksanim",
++      "size": 12056,
++      "sha256": "2167ddd65f527bdf160d7ea47a152cb5ed58a1d6b327b6de1952a6484d465821"
++    },
++    {
++      "path": "content/cars/ks_ford_gt40/animations/car_door_R.ksanim",
++      "size": 12176,
++      "sha256": "ac0242c6cfefe7bd1eef4f36bcd578aa9e97a75a29c3bc44ee4107b2d7cd78a7"
++    },
++    {
++      "path": "content/driver/driver_60.kn5",
++      "size": 15455708,
++      "sha256": "d80bd96918b8c3f99fc4d3996ae8809a0e7569b3220b4c8dcfb7f8117a679a15"
++    },
++    {
++      "path": "content/driver/driver_60_B.kn5",
++      "size": 98497,
++      "sha256": "943e1187f4be585ec246b83f77384794f3e89f7691e2484b60c70f325b715473"
++    },
++    {
++      "path": "content/fonts/digital_big.png",
++      "size": 14992,
++      "sha256": "bccf6218d480c11d79a94acaace210c028eb56740f6894b48bacfa00618770e5"
++    },
++    {
++      "path": "content/fonts/digital_big.txt",
++      "size": 1421,
++      "sha256": "e8c37b6a180f38099bd51080775588d3ce52aeca286997c15a705e02827c42e5"
++    },
++    {
++      "path": "content/fonts/e92_mid.png",
++      "size": 28118,
++      "sha256": "4f5b19ad5cc2afcec38c74a1caf198cc940e4f8c886d99db3267bddf116100e5"
++    },
++    {
++      "path": "content/fonts/e92_mid.txt",
++      "size": 1402,
++      "sha256": "f2f957cf76550a4753e4507a8016e564ef869664d6e52295f5ca3f6c4ebab51c"
++    },
++    {
++      "path": "content/fonts/led_audi.png",
++      "size": 6853,
++      "sha256": "021398208849f6ff8fefc1ea8615ed411e34f07da0f3f93c4cfce59350664058"
++    },
++    {
++      "path": "content/fonts/led_audi.txt",
++      "size": 1051,
++      "sha256": "e9b24260bf0cec72f506d5d4707a3e147b84cc80b7b004a41cf18fad83995d3e"
++    },
++    {
++      "path": "content/texture/crew_BRAND/audi/Brands_Crew.dds",
++      "size": 524416,
++      "sha256": "be6aa49cdaa1c0d78f638a5d01272159746926c9ee871da8976fdc449568ad74"
++    },
++    {
++      "path": "content/texture/crew_BRAND/audi/Brands_Crew_NM.dds",
++      "size": 393344,
++      "sha256": "9374b9d1a8ea78f2bff8cf5e8dfc983f68c50c46acd6a3150d0035dbb05d84d3"
++    },
++    {
++      "path": "content/texture/crew_BRAND/ford/Brands_Crew.dds",
++      "size": 524416,
++      "sha256": "df490bc85e4f1873719fb85ac7dbe0429daa5aa10ed75326b5575571f3943fe2"
++    },
++    {
++      "path": "content/texture/crew_BRAND/ford/Brands_Crew_NM.dds",
++      "size": 393344,
++      "sha256": "eae9f49b9f03541fd527bd9886c1630366bde1e433fb1b013cf6bc39492f81e8"
++    },
++    {
++      "path": "content/texture/crew_BRAND/nissan/Brands_Crew.dds",
++      "size": 524416,
++      "sha256": "c107cf45e31944371bdcfa76c28e6b29d1e3e71af93a4b115081d18f85b1e99a"
++    },
++    {
++      "path": "content/texture/crew_BRAND/nissan/Brands_Crew_NM.dds",
++      "size": 393344,
++      "sha256": "729b7fa7f3c60c487404be9e4ce8622b8e64d52d2b04411c96e63bdbcfedf1b8"
++    },
++    {
++      "path": "content/texture/crew_BRAND/toyota2/Brands_Crew.dds",
++      "size": 524416,
++      "sha256": "3f7531c5ab956ab6f4b141978676a59d1117a4219af4d80422486d6c8be334ed"
++    },
++    {
++      "path": "content/texture/crew_BRAND/toyota2/Brands_Crew_NM.dds",
++      "size": 393344,
++      "sha256": "a234b09d7486e9c4da5f8d9a30c97089bdb9d708bc260bd5080392586e1b6651"
++    },
++    {
++      "path": "content/texture/crew_HELMET/blue/Crew_HELMET_Color.dds",
++      "size": 131200,
++      "sha256": "f838b6dcdba7b30574037d437f59d094e769d4d7b53c4479dcc222450ff001b8"
++    },
++    {
++      "path": "content/texture/crew_HELMET/white/Crew_HELMET_Color.dds",
++      "size": 131200,
++      "sha256": "fde39fcb8aa4059efd83f64d081e45624cdc0b09c4e880b08520f65c9e719495"
++    },
++    {
++      "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Gloves.dds",
++      "size": 524416,
++      "sha256": "d0cf870978eaa35f7d455a5d2bfdfd297014ed835d1ef1bbb576059f57d4ba8a"
++    },
++    {
++      "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Suit2.dds",
++      "size": 1048704,
++      "sha256": "67060194ab32adac81c56e2d712c7baa500c83ea558f66cc8eb6ba5ce2eae438"
++    },
++    {
++      "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Gloves.dds",
++      "size": 524416,
++      "sha256": "04535187489446f3f31b6f5689032da6d1dfe92881c90a6658e36599e97b16b2"
++    },
++    {
++      "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Suit2.dds",
++      "size": 1048704,
++      "sha256": "6129f4977b4451dca117b87b8264e718868bdadeaed56191be44d036518103e8"
++    },
++    {
++      "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Gloves.dds",
++      "size": 524416,
++      "sha256": "39faf14467fdc465b527e008b8f8efc77788478ea105e3dfafe1c6338968df3f"
++    },
++    {
++      "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Suit2.dds",
++      "size": 1048704,
++      "sha256": "c0e37600ac87d9fa1eb7bb034881152563cdd6cb02d26ba732ee504e977ef277"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/classicpastel/_nm/2016_Gloves_NM.dds",
++      "size": 1572992,
++      "sha256": "f582c5bd36f1190da1001b0faab571839e548a3fd5ab47bb1b41793067c3ed68"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00.dds",
++      "size": 87424,
++      "sha256": "b6a407d0ffb415b49082c44cd4bc8b30d3d4b16ffd2504e7f1a0653f60b5fc26"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00_NM.dds",
++      "size": 16512,
++      "sha256": "eae1ac3d80db6b0923f91262d153674995b2e7e3fa1e9370a3981d8cb3409247"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/classicpastel/white/2016_Gloves_DIFF.dds",
++      "size": 524416,
++      "sha256": "d93fa3460f39a9f8fc2f17489fbc24a8d50ce071af673e8c735ce93c307dbda3"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/classicpastel/white/MAT_white.dds",
++      "size": 3200,
++      "sha256": "22e482460d5098e703d8eacf97fbcd9d9afcf0c1524ad9c51f01e0748347938a"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/2016_Gloves_DIFF.dds",
++      "size": 524416,
++      "sha256": "3c71ffed00e0b76c2fedbd34e57c1aff81920ab343129cfc691135448e943eda"
++    },
++    {
++      "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/MAT_white.dds",
++      "size": 3200,
++      "sha256": "22e482460d5098e703d8eacf97fbcd9d9afcf0c1524ad9c51f01e0748347938a"
++    },
++    {
++      "path": "content/texture/driver_HELMET/helmet_1969/white/HELMET_1969.dds",
++      "size": 524416,
++      "sha256": "544ac465f1678a9ee01b0a7483a9f1270ebf1a9de8366fe56c56aac1fbcfa4aa"
++    },
++    {
++      "path": "content/texture/driver_HELMET/helmet_1985/white/HELMET_1985.dds",
++      "size": 262272,
++      "sha256": "49780e7e7636eeb54b25117d0c443997252fd1a7f6da0185ebe02a54e78e8c81"
++    },
++    {
++      "path": "content/texture/driver_HELMET/helmet_base_white/2/HELMET_2012.dds",
++      "size": 1048704,
++      "sha256": "d30c38eb4f1ede771bde0647f35f358f9cf33d08de57280b22c3781d288d8ec6"
++    },
++    {
++      "path": "content/texture/driver_HELMET/helmet_base_white/6/HELMET_2012.dds",
++      "size": 1048704,
++      "sha256": "bb2bec62adbb97ea986697b9524d226341855fbda8820f50f68cd738c43ce1d6"
++    },
++    {
++      "path": "content/texture/driver_SUIT/plain/_nm/2016_Suit_NM.dds",
++      "size": 786560,
++      "sha256": "066caf4447dd0ccb7deb1a13e498dd3004fa063711286136ab65a748fce47ba2"
++    },
++    {
++      "path": "content/texture/driver_SUIT/plain/white/2016_Suit_DIFF.dds",
++      "size": 1048704,
++      "sha256": "847a44cb19683c538d9dbb3ff3a3abf7762b99c7658df1335cbc0e2c5e650c82"
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/phase11_10/inventory_audit.json b/phase11_10/inventory_audit.json
+new file mode 100644
+index 0000000..16a463e
+--- /dev/null
++++ b/phase11_10/inventory_audit.json
+@@ -0,0 +1,275 @@
++[
++  {
++    "path": "content/fonts/led_audi.png",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 6853,
++    "in_patch_zips": 1
++  },
++  {
++    "path": "content/fonts/led_audi.txt",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1051,
++    "in_patch_zips": 1
++  },
++  {
++    "path": "content/texture/crew_BRAND/toyota2/Brands_Crew.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_BRAND/toyota2/Brands_Crew_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 393344,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_HELMET/white/Crew_HELMET_Color.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 131200,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Gloves.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Suit2.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1048704,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_HELMET/helmet_1985/white/HELMET_1985.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 262272,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/fonts/digital_big.png",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 14992,
++    "in_patch_zips": 1
++  },
++  {
++    "path": "content/fonts/digital_big.txt",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1421,
++    "in_patch_zips": 1
++  },
++  {
++    "path": "content/texture/crew_BRAND/nissan/Brands_Crew.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_BRAND/nissan/Brands_Crew_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 393344,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/2016_Gloves_DIFF.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/MAT_white.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 3200,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_HELMET/helmet_base_white/2/HELMET_2012.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1048704,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/cars/ks_ford_gt40/animations/car_door_R.ksanim",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 12176,
++    "in_patch_zips": 0
++  },
++  {
++    "path": "content/texture/crew_BRAND/ford/Brands_Crew.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_BRAND/ford/Brands_Crew_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 393344,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_HELMET/blue/Crew_HELMET_Color.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 131200,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Gloves.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Suit2.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1048704,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/classicpastel/_nm/2016_Gloves_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1572992,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 87424,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 16512,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/classicpastel/white/2016_Gloves_DIFF.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_GLOVES/classicpastel/white/MAT_white.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 3200,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_HELMET/helmet_1969/white/HELMET_1969.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_SUIT/plain/_nm/2016_Suit_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 786560,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/driver_SUIT/plain/white/2016_Suit_DIFF.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1048704,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/cars/ks_audi_sport_quattro/animations/car_door_L.ksanim",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 12056,
++    "in_patch_zips": 0
++  },
++  {
++    "path": "content/texture/crew_BRAND/audi/Brands_Crew.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_BRAND/audi/Brands_Crew_NM.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 393344,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Gloves.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 524416,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Suit2.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1048704,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/fonts/e92_mid.png",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 28118,
++    "in_patch_zips": 1
++  },
++  {
++    "path": "content/fonts/e92_mid.txt",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1402,
++    "in_patch_zips": 1
++  },
++  {
++    "path": "content/texture/driver_HELMET/helmet_base_white/6/HELMET_2012.dds",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 1048704,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/driver/driver_60.kn5",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 15455708,
++    "in_patch_zips": 2
++  },
++  {
++    "path": "content/driver/driver_60_B.kn5",
++    "in_ac": true,
++    "in_pack": true,
++    "size": 98497,
++    "in_patch_zips": 2
++  }
++]
+\ No newline at end of file
+diff --git a/phase11_10/missing_inventory.txt b/phase11_10/missing_inventory.txt
+new file mode 100644
+index 0000000..7512d78
+--- /dev/null
++++ b/phase11_10/missing_inventory.txt
+@@ -0,0 +1,39 @@
++content/fonts/led_audi.png
++content/fonts/led_audi.txt
++content/texture/crew_BRAND/toyota2/Brands_Crew.dds
++content/texture/crew_BRAND/toyota2/Brands_Crew_NM.dds
++content/texture/crew_HELMET/white/Crew_HELMET_Color.dds
++content/texture/crew_SUIT/type1/white_black/DRIVER_Gloves.dds
++content/texture/crew_SUIT/type1/white_black/DRIVER_Suit2.dds
++content/texture/driver_HELMET/helmet_1985/white/HELMET_1985.dds
++content/fonts/digital_big.png
++content/fonts/digital_big.txt
++content/texture/crew_BRAND/nissan/Brands_Crew.dds
++content/texture/crew_BRAND/nissan/Brands_Crew_NM.dds
++content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/2016_Gloves_DIFF.dds
++content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/MAT_white.dds
++content/texture/driver_HELMET/helmet_base_white/2/HELMET_2012.dds
++content/cars/ks_ford_gt40/animations/car_door_R.ksanim
++content/texture/crew_BRAND/ford/Brands_Crew.dds
++content/texture/crew_BRAND/ford/Brands_Crew_NM.dds
++content/texture/crew_HELMET/blue/Crew_HELMET_Color.dds
++content/texture/crew_SUIT/type1/blue_white/DRIVER_Gloves.dds
++content/texture/crew_SUIT/type1/blue_white/DRIVER_Suit2.dds
++content/texture/driver_GLOVES/classicpastel/_nm/2016_Gloves_NM.dds
++content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00.dds
++content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00_NM.dds
++content/texture/driver_GLOVES/classicpastel/white/2016_Gloves_DIFF.dds
++content/texture/driver_GLOVES/classicpastel/white/MAT_white.dds
++content/texture/driver_HELMET/helmet_1969/white/HELMET_1969.dds
++content/texture/driver_SUIT/plain/_nm/2016_Suit_NM.dds
++content/texture/driver_SUIT/plain/white/2016_Suit_DIFF.dds
++content/cars/ks_audi_sport_quattro/animations/car_door_L.ksanim
++content/texture/crew_BRAND/audi/Brands_Crew.dds
++content/texture/crew_BRAND/audi/Brands_Crew_NM.dds
++content/texture/crew_SUIT/type1/red_white/DRIVER_Gloves.dds
++content/texture/crew_SUIT/type1/red_white/DRIVER_Suit2.dds
++content/fonts/e92_mid.png
++content/fonts/e92_mid.txt
++content/texture/driver_HELMET/helmet_base_white/6/HELMET_2012.dds
++content/driver/driver_60.kn5
++content/driver/driver_60_B.kn5
+diff --git a/scripts/phase11_10_validate.py b/scripts/phase11_10_validate.py
+new file mode 100644
+index 0000000..b86a7ce
+--- /dev/null
++++ b/scripts/phase11_10_validate.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python3
++"""Phase 11.10 validator: real file-existence checks for the five affected
++cars, driven by the Phase 11.9 dependency manifest (no hardcoded PASS)."""
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++PACK = ROOT / "content_pack"
++REQ = json.loads((ROOT / "phase11_9/content_requirements.json").read_text(encoding="utf-8"))["combinations"]
++INV = [l.strip() for l in (ROOT / "phase11_10/missing_inventory.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
++
++CARS = ["ks_toyota_ae86", "ks_nissan_370z", "ks_ford_gt40",
++        "ks_audi_sport_quattro", "bmw_m3_e92_drift"]
++TRACKS = ["magione", "imola", "trento-bondone"]
++
++failures = 0
++for car in CARS:
++    total_missing = []
++    for track in TRACKS:
++        entry = REQ.get(f"{car}|{track}")
++        if not entry:
++            failures += 1
++            print(f"FAIL {car}|{track}: no manifest entry")
++            continue
++        missing = [p for p in entry["required"] if not (PACK / p).is_file()]
++        total_missing.extend(missing)
++    if total_missing:
++        failures += 1
++        print(f"FAIL {car}: {len(set(total_missing))} required files missing")
++        for p in sorted(set(total_missing))[:8]:
++            print("   ", p)
++    else:
++        print(f"PASS {car}: all required resources present for {len(TRACKS)} tracks")
++
++missing_inventory = [p for p in INV if not (PACK / p).is_file()]
++if missing_inventory:
++    failures += 1
++    print("FAIL inventory:", missing_inventory)
++else:
++    print(f"PASS inventory: all {len(INV)} reported files present in local pack")
++
++print("RESULT:", "PASS" if failures == 0 else f"FAIL ({failures})")
++raise SystemExit(1 if failures else 0)
