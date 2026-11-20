@@ -1,4 +1,19 @@
-# HANDOFF — Assetto Corsa iOS Port (Phase 11.9 dependency validator)
+# HANDOFF — Assetto Corsa iOS Port (Phase 11.10 asset repair)
+
+## PHASE 11.10 — ASSET REPAIR
+
+- Все 39 сообщённых Preflight-файлов есть и в `D:\Games\assettocorsa`, и в локальном
+  content pack; все 39 уже присутствуют в required-части dependency manifest.
+  Проблема была в доставке на iPhone, а не в логике валидатора.
+- Новый инкрементальный патч (только 39 файлов + MANIFEST.json):
+  `C:\Users\User\Desktop\AC-iOS-content-pack\content-assets-fix-11.10.zip`
+  — 11,467,807 B, SHA `011d36c13e8cbaea2f4e44c673b3ad4d1e4a24c80de909f729ffd8c128332e87`.
+- Валидация: `scripts/phase11_10_validate.py` → 5/5 affected cars PASS,
+  inventory PASS. Реальный `full_frame` с AC_ROOT=локальный pack → 5/5 exit=0 + PNG.
+- Ни одного изменения кода: IPA остаётся `5874bde2…`; Preflight и Phase 10
+  memory fix не тронуты. driver_60 остаётся optional.
+- REPORT: `phase11_10/PHASE11_10_REPORT.md`; inventory `phase11_10/inventory_audit.json`.
+- **REAL DEVICE PREFLIGHT VALIDATION: NOT CONFIRMED.**
 
 ## PHASE 11.9 — SYSTEMIC FIX
 

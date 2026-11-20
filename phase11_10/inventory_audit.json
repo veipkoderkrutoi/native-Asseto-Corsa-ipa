@@ -1,0 +1,275 @@
+[
+  {
+    "path": "content/fonts/led_audi.png",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 6853,
+    "in_patch_zips": 1
+  },
+  {
+    "path": "content/fonts/led_audi.txt",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1051,
+    "in_patch_zips": 1
+  },
+  {
+    "path": "content/texture/crew_BRAND/toyota2/Brands_Crew.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_BRAND/toyota2/Brands_Crew_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 393344,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_HELMET/white/Crew_HELMET_Color.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 131200,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Gloves.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Suit2.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1048704,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_HELMET/helmet_1985/white/HELMET_1985.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 262272,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/fonts/digital_big.png",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 14992,
+    "in_patch_zips": 1
+  },
+  {
+    "path": "content/fonts/digital_big.txt",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1421,
+    "in_patch_zips": 1
+  },
+  {
+    "path": "content/texture/crew_BRAND/nissan/Brands_Crew.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_BRAND/nissan/Brands_Crew_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 393344,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/2016_Gloves_DIFF.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/MAT_white.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 3200,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_HELMET/helmet_base_white/2/HELMET_2012.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1048704,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/cars/ks_ford_gt40/animations/car_door_R.ksanim",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 12176,
+    "in_patch_zips": 0
+  },
+  {
+    "path": "content/texture/crew_BRAND/ford/Brands_Crew.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_BRAND/ford/Brands_Crew_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 393344,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_HELMET/blue/Crew_HELMET_Color.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 131200,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Gloves.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Suit2.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1048704,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/classicpastel/_nm/2016_Gloves_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1572992,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 87424,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 16512,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/classicpastel/white/2016_Gloves_DIFF.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_GLOVES/classicpastel/white/MAT_white.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 3200,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_HELMET/helmet_1969/white/HELMET_1969.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_SUIT/plain/_nm/2016_Suit_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 786560,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/driver_SUIT/plain/white/2016_Suit_DIFF.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1048704,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/cars/ks_audi_sport_quattro/animations/car_door_L.ksanim",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 12056,
+    "in_patch_zips": 0
+  },
+  {
+    "path": "content/texture/crew_BRAND/audi/Brands_Crew.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_BRAND/audi/Brands_Crew_NM.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 393344,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Gloves.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 524416,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Suit2.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1048704,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/fonts/e92_mid.png",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 28118,
+    "in_patch_zips": 1
+  },
+  {
+    "path": "content/fonts/e92_mid.txt",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1402,
+    "in_patch_zips": 1
+  },
+  {
+    "path": "content/texture/driver_HELMET/helmet_base_white/6/HELMET_2012.dds",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 1048704,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/driver/driver_60.kn5",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 15455708,
+    "in_patch_zips": 2
+  },
+  {
+    "path": "content/driver/driver_60_B.kn5",
+    "in_ac": true,
+    "in_pack": true,
+    "size": 98497,
+    "in_patch_zips": 2
+  }
+]

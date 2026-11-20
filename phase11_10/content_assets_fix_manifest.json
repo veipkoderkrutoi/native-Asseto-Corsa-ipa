@@ -1,0 +1,202 @@
+{
+  "archive": "content-assets-fix-11.10.zip",
+  "size": 11467807,
+  "sha256": "011d36c13e8cbaea2f4e44c673b3ad4d1e4a24c80de909f729ffd8c128332e87",
+  "files": [
+    {
+      "path": "content/cars/ks_audi_sport_quattro/animations/car_door_L.ksanim",
+      "size": 12056,
+      "sha256": "2167ddd65f527bdf160d7ea47a152cb5ed58a1d6b327b6de1952a6484d465821"
+    },
+    {
+      "path": "content/cars/ks_ford_gt40/animations/car_door_R.ksanim",
+      "size": 12176,
+      "sha256": "ac0242c6cfefe7bd1eef4f36bcd578aa9e97a75a29c3bc44ee4107b2d7cd78a7"
+    },
+    {
+      "path": "content/driver/driver_60.kn5",
+      "size": 15455708,
+      "sha256": "d80bd96918b8c3f99fc4d3996ae8809a0e7569b3220b4c8dcfb7f8117a679a15"
+    },
+    {
+      "path": "content/driver/driver_60_B.kn5",
+      "size": 98497,
+      "sha256": "943e1187f4be585ec246b83f77384794f3e89f7691e2484b60c70f325b715473"
+    },
+    {
+      "path": "content/fonts/digital_big.png",
+      "size": 14992,
+      "sha256": "bccf6218d480c11d79a94acaace210c028eb56740f6894b48bacfa00618770e5"
+    },
+    {
+      "path": "content/fonts/digital_big.txt",
+      "size": 1421,
+      "sha256": "e8c37b6a180f38099bd51080775588d3ce52aeca286997c15a705e02827c42e5"
+    },
+    {
+      "path": "content/fonts/e92_mid.png",
+      "size": 28118,
+      "sha256": "4f5b19ad5cc2afcec38c74a1caf198cc940e4f8c886d99db3267bddf116100e5"
+    },
+    {
+      "path": "content/fonts/e92_mid.txt",
+      "size": 1402,
+      "sha256": "f2f957cf76550a4753e4507a8016e564ef869664d6e52295f5ca3f6c4ebab51c"
+    },
+    {
+      "path": "content/fonts/led_audi.png",
+      "size": 6853,
+      "sha256": "021398208849f6ff8fefc1ea8615ed411e34f07da0f3f93c4cfce59350664058"
+    },
+    {
+      "path": "content/fonts/led_audi.txt",
+      "size": 1051,
+      "sha256": "e9b24260bf0cec72f506d5d4707a3e147b84cc80b7b004a41cf18fad83995d3e"
+    },
+    {
+      "path": "content/texture/crew_BRAND/audi/Brands_Crew.dds",
+      "size": 524416,
+      "sha256": "be6aa49cdaa1c0d78f638a5d01272159746926c9ee871da8976fdc449568ad74"
+    },
+    {
+      "path": "content/texture/crew_BRAND/audi/Brands_Crew_NM.dds",
+      "size": 393344,
+      "sha256": "9374b9d1a8ea78f2bff8cf5e8dfc983f68c50c46acd6a3150d0035dbb05d84d3"
+    },
+    {
+      "path": "content/texture/crew_BRAND/ford/Brands_Crew.dds",
+      "size": 524416,
+      "sha256": "df490bc85e4f1873719fb85ac7dbe0429daa5aa10ed75326b5575571f3943fe2"
+    },
+    {
+      "path": "content/texture/crew_BRAND/ford/Brands_Crew_NM.dds",
+      "size": 393344,
+      "sha256": "eae9f49b9f03541fd527bd9886c1630366bde1e433fb1b013cf6bc39492f81e8"
+    },
+    {
+      "path": "content/texture/crew_BRAND/nissan/Brands_Crew.dds",
+      "size": 524416,
+      "sha256": "c107cf45e31944371bdcfa76c28e6b29d1e3e71af93a4b115081d18f85b1e99a"
+    },
+    {
+      "path": "content/texture/crew_BRAND/nissan/Brands_Crew_NM.dds",
+      "size": 393344,
+      "sha256": "729b7fa7f3c60c487404be9e4ce8622b8e64d52d2b04411c96e63bdbcfedf1b8"
+    },
+    {
+      "path": "content/texture/crew_BRAND/toyota2/Brands_Crew.dds",
+      "size": 524416,
+      "sha256": "3f7531c5ab956ab6f4b141978676a59d1117a4219af4d80422486d6c8be334ed"
+    },
+    {
+      "path": "content/texture/crew_BRAND/toyota2/Brands_Crew_NM.dds",
+      "size": 393344,
+      "sha256": "a234b09d7486e9c4da5f8d9a30c97089bdb9d708bc260bd5080392586e1b6651"
+    },
+    {
+      "path": "content/texture/crew_HELMET/blue/Crew_HELMET_Color.dds",
+      "size": 131200,
+      "sha256": "f838b6dcdba7b30574037d437f59d094e769d4d7b53c4479dcc222450ff001b8"
+    },
+    {
+      "path": "content/texture/crew_HELMET/white/Crew_HELMET_Color.dds",
+      "size": 131200,
+      "sha256": "fde39fcb8aa4059efd83f64d081e45624cdc0b09c4e880b08520f65c9e719495"
+    },
+    {
+      "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Gloves.dds",
+      "size": 524416,
+      "sha256": "d0cf870978eaa35f7d455a5d2bfdfd297014ed835d1ef1bbb576059f57d4ba8a"
+    },
+    {
+      "path": "content/texture/crew_SUIT/type1/blue_white/DRIVER_Suit2.dds",
+      "size": 1048704,
+      "sha256": "67060194ab32adac81c56e2d712c7baa500c83ea558f66cc8eb6ba5ce2eae438"
+    },
+    {
+      "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Gloves.dds",
+      "size": 524416,
+      "sha256": "04535187489446f3f31b6f5689032da6d1dfe92881c90a6658e36599e97b16b2"
+    },
+    {
+      "path": "content/texture/crew_SUIT/type1/red_white/DRIVER_Suit2.dds",
+      "size": 1048704,
+      "sha256": "6129f4977b4451dca117b87b8264e718868bdadeaed56191be44d036518103e8"
+    },
+    {
+      "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Gloves.dds",
+      "size": 524416,
+      "sha256": "39faf14467fdc465b527e008b8f8efc77788478ea105e3dfafe1c6338968df3f"
+    },
+    {
+      "path": "content/texture/crew_SUIT/type1/white_black/DRIVER_Suit2.dds",
+      "size": 1048704,
+      "sha256": "c0e37600ac87d9fa1eb7bb034881152563cdd6cb02d26ba732ee504e977ef277"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/classicpastel/_nm/2016_Gloves_NM.dds",
+      "size": 1572992,
+      "sha256": "f582c5bd36f1190da1001b0faab571839e548a3fd5ab47bb1b41793067c3ed68"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00.dds",
+      "size": 87424,
+      "sha256": "b6a407d0ffb415b49082c44cd4bc8b30d3d4b16ffd2504e7f1a0653f60b5fc26"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/classicpastel/_nm/DETAIL_ALPINESTARS_00_NM.dds",
+      "size": 16512,
+      "sha256": "eae1ac3d80db6b0923f91262d153674995b2e7e3fa1e9370a3981d8cb3409247"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/classicpastel/white/2016_Gloves_DIFF.dds",
+      "size": 524416,
+      "sha256": "d93fa3460f39a9f8fc2f17489fbc24a8d50ce071af673e8c735ce93c307dbda3"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/classicpastel/white/MAT_white.dds",
+      "size": 3200,
+      "sha256": "22e482460d5098e703d8eacf97fbcd9d9afcf0c1524ad9c51f01e0748347938a"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/2016_Gloves_DIFF.dds",
+      "size": 524416,
+      "sha256": "3c71ffed00e0b76c2fedbd34e57c1aff81920ab343129cfc691135448e943eda"
+    },
+    {
+      "path": "content/texture/driver_GLOVES/sparco_racecars_arrow_rg7/white_black_red/MAT_white.dds",
+      "size": 3200,
+      "sha256": "22e482460d5098e703d8eacf97fbcd9d9afcf0c1524ad9c51f01e0748347938a"
+    },
+    {
+      "path": "content/texture/driver_HELMET/helmet_1969/white/HELMET_1969.dds",
+      "size": 524416,
+      "sha256": "544ac465f1678a9ee01b0a7483a9f1270ebf1a9de8366fe56c56aac1fbcfa4aa"
+    },
+    {
+      "path": "content/texture/driver_HELMET/helmet_1985/white/HELMET_1985.dds",
+      "size": 262272,
+      "sha256": "49780e7e7636eeb54b25117d0c443997252fd1a7f6da0185ebe02a54e78e8c81"
+    },
+    {
+      "path": "content/texture/driver_HELMET/helmet_base_white/2/HELMET_2012.dds",
+      "size": 1048704,
+      "sha256": "d30c38eb4f1ede771bde0647f35f358f9cf33d08de57280b22c3781d288d8ec6"
+    },
+    {
+      "path": "content/texture/driver_HELMET/helmet_base_white/6/HELMET_2012.dds",
+      "size": 1048704,
+      "sha256": "bb2bec62adbb97ea986697b9524d226341855fbda8820f50f68cd738c43ce1d6"
+    },
+    {
+      "path": "content/texture/driver_SUIT/plain/_nm/2016_Suit_NM.dds",
+      "size": 786560,
+      "sha256": "066caf4447dd0ccb7deb1a13e498dd3004fa063711286136ab65a748fce47ba2"
+    },
+    {
+      "path": "content/texture/driver_SUIT/plain/white/2016_Suit_DIFF.dds",
+      "size": 1048704,
+      "sha256": "847a44cb19683c538d9dbb3ff3a3abf7762b99c7658df1335cbc0e2c5e650c82"
+    }
+  ]
+}
