@@ -1,4 +1,24 @@
-# HANDOFF — Assetto Corsa iOS Port (Hotfix 11.8 driver asset)
+# HANDOFF — Assetto Corsa iOS Port (Phase 11.9 dependency validator)
+
+## PHASE 11.9 — SYSTEMIC FIX
+
+- Ошибка `content/objects3D/cubemap_model.kn5: No such file` — не одиночный фикс:
+  импортер копировал только whitelist папок. Теперь есть точный dependency manifest.
+- `phase11_9/content_requirements.json` (1.48 MB, только относительные пути,
+  24 комбинации 8 машин × 3 трассы) сгенерирован через upstream
+  `files_of_picture` + реальные `full_frame --files` (24/24 OK).
+- Required union = 454 файла; 6 недостающих шрифтов добавлены в локальный pack.
+- Новый `ACContentValidator` проверяет все required-файлы ДО DRIVE и блокирует
+  запуск с панелью `CONTENT VALIDATION FAILED` + полный список путей и CLOSE.
+- Импортер теперь копирует manifest-зависимости инкрементально (только недостающие
+  или с отличающимся размером), плюс `content/driver`, `texture`, `objects3D`,
+  `fonts`, `weather`, `system`.
+- Маленький патч для телефона (43.5 MiB, 228 файлов):
+  `C:\Users\User\Desktop\AC-iOS-content-pack\content-dependencies-fix.zip`.
+- Тесты: preflight PASS, rustyac-render 44 PASS, runtime 9 PASS, iOS check PASS,
+  verify 52/52, audit PASS. Отчёт `phase11_9/PHASE11_9_REPORT.md`,
+  патч `patches/phase11_9/`, чекпоинт `before_phase11_9`.
+- **REAL DEVICE DRIVE VALIDATION: NOT CONFIRMED.**
 
 ## PHASE 11.8 HOTFIX
 
@@ -14,7 +34,7 @@
   `C:\Users\User\Desktop\AC-iOS-content-pack\driver-fix.zip` — 31.18 MiB, 57 файлов.
 - Тесты: rustyac-render 44 PASS, ac-ios-runtime 9 PASS, iOS check PASS,
   verify 52/52, prepush PASS. Отчёт `phase11_8/PHASE11_8_REPORT.md`,
-  патч `patches/phase11_8/`, коммит `93bcd57`.
+  патч `patches/phase11_8/`, коммит `fed9d27`.
 - **REAL DEVICE DRIVE VALIDATION: NOT CONFIRMED.**
 
 GitHub:
@@ -159,7 +179,7 @@ AC-сцену, машина едет, телеметрия/камеры рабо
 - Реальный `full_frame` load: 6/6 OK (5 новых машин @ magione + lotus @ trento).
 - Garage показывает РЕАЛЬНЫЕ имена из ui_car.json и превью из пользовательского
   контента (84×48, кэш), без загрузки KN5 ради карточек.
-- IPA: CI `44704970168` success, SHA `472307943e…`, 4,360,000 B; старая IPA
+- IPA: CI `44715522637` success, SHA `472307943e…`, 4,537,673 B; старая IPA
   сохранена как `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa`.
 - **REAL DEVICE VALIDATION: NOT CONFIRMED** — popup/импорт/новый контент нужно
   проверить на iPhone.

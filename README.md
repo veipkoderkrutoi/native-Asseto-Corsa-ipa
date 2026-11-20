@@ -13,7 +13,7 @@ their own legal AC content; no protected game assets are stored in this repo.
   with real folder picker, and a 5-car + hill-climb content expansion.
 - Unsigned IPA is built in GitHub Actions on `macos-26-intel`; see Releases.
 - Latest unsigned IPA (Phase 11.7): SHA-256
-  `78366fb7d9c95d27f29e4f1d6bbb4773116b965f919a73888aca82e4e121025f`.
+  `5874bde2c837b70cd60c38beaa1b9c8dd0d664ecc9cbf46bfaa69fde01767f4a`.
 
 ## Where things are
 
