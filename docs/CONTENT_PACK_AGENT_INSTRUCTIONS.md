@@ -83,6 +83,14 @@ Test-Path 'content_pack\system\shaders\win\ksSky_vs.fxo'   # must be True
 `Documents/AC-iOS/system` рядом с существующей `content`. Существующие
 машины/трассы не трогать.
 
+### Обязательный `content/driver`
+
+`rustyac-render/src/driver.rs` загружает `content/driver/<MODEL>.kn5` для машин
+с `driver3d.ini`. Копируй всю папку `content/driver` (модели `driver_no_HANS`,
+`driver_60`, `driver_80`, их `_B`) и связанные `content/texture/driver_*` и
+`crew_*`. Если `content/driver` нет, импортер предупредит, а рендерер продолжит
+без 3D-водителя — но настоящий контент должен быть скопирован.
+
 ## 4. Обновить manifest
 
 Локальный manifest должен отражать реальное содержимое. Используй

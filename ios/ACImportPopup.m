@@ -253,6 +253,23 @@ typedef NS_ENUM(NSInteger, ACImportState) {
         return;
     }
 
+    // Shared resources live beside cars/tracks. rustyAC loads
+    // content/driver/<model>.kn5 for every car that has driver3d.ini, plus
+    // content/texture for driver skins, weather and track surfaces.
+    NSURL *contentRoot = [root.path hasSuffix:@"/content"]
+        ? root
+        : [root URLByAppendingPathComponent:@"content" isDirectory:YES];
+    NSMutableArray<NSURL *> *shared = [NSMutableArray array];
+    for (NSString *name in @[@"driver", @"texture", @"fonts", @"objects3D", @"weather"]) {
+        NSURL *u = [contentRoot URLByAppendingPathComponent:name isDirectory:YES];
+        BOOL existsDir = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:u.path isDirectory:&existsDir] && existsDir) {
+            [shared addObject:u];
+        }
+    }
+    BOOL hasDriverFolder = [shared containsObject:
+        [contentRoot URLByAppendingPathComponent:@"driver" isDirectory:YES]];
+
     NSArray<NSURL *> *cars = [self itemsIn:srcCars];
     NSArray<NSURL *> *tracks = [self itemsIn:srcTracks];
     if (cars.count == 0 && tracks.count == 0) {
@@ -281,14 +298,17 @@ typedef NS_ENUM(NSInteger, ACImportState) {
  withIntermediateDirectories:YES attributes:nil error:nil];
 
     NSUInteger total = [self fileCountIn:srcSystem];
+    for (NSURL *u in shared) total += [self fileCountIn:u];
     for (NSURL *u in cars) total += [self fileCountIn:u];
     for (NSURL *u in tracks) total += [self fileCountIn:u];
     if (total == 0) total = 1;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self setState:ACImportImporting];
-        _bodyLabel.text = [NSString stringWithFormat:@"Copying %lu cars and %lu tracks…",
-                           (unsigned long)cars.count, (unsigned long)tracks.count];
+        _bodyLabel.text = [NSString stringWithFormat:
+                           @"Copying %lu cars, %lu tracks and %lu shared resource folders…",
+                           (unsigned long)cars.count, (unsigned long)tracks.count,
+                           (unsigned long)shared.count];
     });
 
     __block NSUInteger done = 0;
@@ -314,6 +334,14 @@ typedef NS_ENUM(NSInteger, ACImportState) {
         copyOne(child, [destRoot URLByAppendingPathComponent:
                         [@"system" stringByAppendingPathComponent:child.lastPathComponent] isDirectory:YES]);
     }
+    for (NSURL *folder in shared) {
+        NSURL *dst = [destRoot URLByAppendingPathComponent:
+                      [@"content" stringByAppendingPathComponent:folder.lastPathComponent] isDirectory:YES];
+        [fm createDirectoryAtPath:dst.path withIntermediateDirectories:YES attributes:nil error:nil];
+        for (NSURL *child in [self itemsIn:folder]) {
+            copyOne(child, [dst URLByAppendingPathComponent:child.lastPathComponent isDirectory:YES]);
+        }
+    }
     for (NSURL *car in cars) copyOne(car, [destCars URLByAppendingPathComponent:car.lastPathComponent isDirectory:YES]);
     for (NSURL *track in tracks) copyOne(track, [destTracks URLByAppendingPathComponent:track.lastPathComponent isDirectory:YES]);
 
@@ -330,9 +358,12 @@ typedef NS_ENUM(NSInteger, ACImportState) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self setState:ACImportCompleted];
-        _bodyLabel.text = [NSString stringWithFormat:@"Imported %lu cars and %lu tracks into the app's "
-                           "private Documents storage. Your original game folder was not modified.",
-                           (unsigned long)cars.count, (unsigned long)tracks.count];
+        NSString *note = hasDriverFolder ? @""
+            : @" Warning: no content/driver folder was found; the renderer will run without a 3D driver model.";
+        _bodyLabel.text = [NSString stringWithFormat:@"Imported %lu cars, %lu tracks and %lu shared folders "
+                           "into the app's private Documents storage. Your original game folder was not modified.%@",
+                           (unsigned long)cars.count, (unsigned long)tracks.count,
+                           (unsigned long)shared.count, note];
         if (self.completion) self.completion(destRoot, cars.count, tracks.count, nil);
         [self.pickedURL stopAccessingSecurityScopedResource];
         self.pickedURL = nil;

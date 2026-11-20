@@ -1,0 +1,271 @@
+﻿diff --git a/ios/ACImportPopup.m b/ios/ACImportPopup.m
+index e83d9a5..75c6fdb 100644
+--- a/ios/ACImportPopup.m
++++ b/ios/ACImportPopup.m
+@@ -253,6 +253,23 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+         return;
+     }
+ 
++    // Shared resources live beside cars/tracks. rustyAC loads
++    // content/driver/<model>.kn5 for every car that has driver3d.ini, plus
++    // content/texture for driver skins, weather and track surfaces.
++    NSURL *contentRoot = [root.path hasSuffix:@"/content"]
++        ? root
++        : [root URLByAppendingPathComponent:@"content" isDirectory:YES];
++    NSMutableArray<NSURL *> *shared = [NSMutableArray array];
++    for (NSString *name in @[@"driver", @"texture", @"fonts", @"objects3D", @"weather"]) {
++        NSURL *u = [contentRoot URLByAppendingPathComponent:name isDirectory:YES];
++        BOOL existsDir = NO;
++        if ([[NSFileManager defaultManager] fileExistsAtPath:u.path isDirectory:&existsDir] && existsDir) {
++            [shared addObject:u];
++        }
++    }
++    BOOL hasDriverFolder = [shared containsObject:
++        [contentRoot URLByAppendingPathComponent:@"driver" isDirectory:YES]];
++
+     NSArray<NSURL *> *cars = [self itemsIn:srcCars];
+     NSArray<NSURL *> *tracks = [self itemsIn:srcTracks];
+     if (cars.count == 0 && tracks.count == 0) {
+@@ -281,14 +298,17 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+  withIntermediateDirectories:YES attributes:nil error:nil];
+ 
+     NSUInteger total = [self fileCountIn:srcSystem];
++    for (NSURL *u in shared) total += [self fileCountIn:u];
+     for (NSURL *u in cars) total += [self fileCountIn:u];
+     for (NSURL *u in tracks) total += [self fileCountIn:u];
+     if (total == 0) total = 1;
+ 
+     dispatch_async(dispatch_get_main_queue(), ^{
+         [self setState:ACImportImporting];
+-        _bodyLabel.text = [NSString stringWithFormat:@"Copying %lu cars and %lu tracksтАж",
+-                           (unsigned long)cars.count, (unsigned long)tracks.count];
++        _bodyLabel.text = [NSString stringWithFormat:
++                           @"Copying %lu cars, %lu tracks and %lu shared resource foldersтАж",
++                           (unsigned long)cars.count, (unsigned long)tracks.count,
++                           (unsigned long)shared.count];
+     });
+ 
+     __block NSUInteger done = 0;
+@@ -314,6 +334,14 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+         copyOne(child, [destRoot URLByAppendingPathComponent:
+                         [@"system" stringByAppendingPathComponent:child.lastPathComponent] isDirectory:YES]);
+     }
++    for (NSURL *folder in shared) {
++        NSURL *dst = [destRoot URLByAppendingPathComponent:
++                      [@"content" stringByAppendingPathComponent:folder.lastPathComponent] isDirectory:YES];
++        [fm createDirectoryAtPath:dst.path withIntermediateDirectories:YES attributes:nil error:nil];
++        for (NSURL *child in [self itemsIn:folder]) {
++            copyOne(child, [dst URLByAppendingPathComponent:child.lastPathComponent isDirectory:YES]);
++        }
++    }
+     for (NSURL *car in cars) copyOne(car, [destCars URLByAppendingPathComponent:car.lastPathComponent isDirectory:YES]);
+     for (NSURL *track in tracks) copyOne(track, [destTracks URLByAppendingPathComponent:track.lastPathComponent isDirectory:YES]);
+ 
+@@ -330,9 +358,12 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+ 
+     dispatch_async(dispatch_get_main_queue(), ^{
+         [self setState:ACImportCompleted];
+-        _bodyLabel.text = [NSString stringWithFormat:@"Imported %lu cars and %lu tracks into the app's "
+-                           "private Documents storage. Your original game folder was not modified.",
+-                           (unsigned long)cars.count, (unsigned long)tracks.count];
++        NSString *note = hasDriverFolder ? @""
++            : @" Warning: no content/driver folder was found; the renderer will run without a 3D driver model.";
++        _bodyLabel.text = [NSString stringWithFormat:@"Imported %lu cars, %lu tracks and %lu shared folders "
++                           "into the app's private Documents storage. Your original game folder was not modified.%@",
++                           (unsigned long)cars.count, (unsigned long)tracks.count,
++                           (unsigned long)shared.count, note];
+         if (self.completion) self.completion(destRoot, cars.count, tracks.count, nil);
+         [self.pickedURL stopAccessingSecurityScopedResource];
+         self.pickedURL = nil;
+diff --git a/ios/GameViewController.m b/ios/GameViewController.m
+index 9a03979..cf2ab6b 100644
+--- a/ios/GameViewController.m
++++ b/ios/GameViewController.m
+@@ -288,6 +288,7 @@
+ @property (nonatomic, strong) UILabel *timingLaps;
+ @property (nonatomic, strong) UILabel *debugLabel;
+ @property (nonatomic, strong) UILabel *messageLabel;
++@property (nonatomic, strong) UIButton *messageCloseButton;
+ 
+ // Session state
+ @property (nonatomic, assign) BOOL sessionOpen;
+@@ -611,7 +612,16 @@
+     self.messageLabel.textColor = [UIColor colorWithRed:1 green:0.55 blue:0.35 alpha:1];
+     self.messageLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
+     self.messageLabel.layer.cornerRadius = 6;
++    self.messageLabel.userInteractionEnabled = YES;
+     [self.view addSubview:self.messageLabel];
++
++    self.messageCloseButton = [UIButton buttonWithType:UIButtonTypeCustom];
++    [self.messageCloseButton setTitle:@"тЬХ" forState:UIControlStateNormal];
++    [self.messageCloseButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
++    self.messageCloseButton.titleLabel.font = [UIFont boldSystemFontOfSize:15];
++    [self.messageCloseButton addTarget:self action:@selector(dismissMessage)
++                      forControlEvents:UIControlEventTouchUpInside];
++    [self.messageLabel addSubview:self.messageCloseButton];
+ }
+ 
+ #pragma mark - Layout
+@@ -755,6 +765,7 @@
+ 
+     self.debugLabel.frame = CGRectMake(safe.left + 12, safe.top + 144, MIN(310, w * 0.34), 170);
+     self.messageLabel.frame = CGRectMake((w - 520) / 2, (h - 80) / 2, 520, 80);
++    self.messageCloseButton.frame = CGRectMake(492, 4, 24, 24);
+ }
+ 
+ #pragma mark - Navigation
+@@ -783,7 +794,7 @@
+     for (UIView *v in @[self.wheel, self.gasPedal, self.brakePedal, self.gearUpButton,
+                         self.gearDownButton, self.handbrakeButton, self.cameraButton,
+                         self.menuButton, self.gearboxButton, self.hudPanel, self.timingPanel,
+-                        self.debugLabel, self.messageLabel]) v.hidden = hidden;
++                        self.debugLabel, self.messageLabel, self.messageCloseButton]) v.hidden = hidden;
+ }
+ 
+ - (void)menuButtonTapped {
+@@ -959,9 +970,39 @@
+     uint64_t features[4] = {0};
+     ac_ios_metal_device_info(features);
+     self.metalFeatures = (unsigned long long)features[0];
+-    if (ac_ios_render_init(ac_pal_bridge_session(), width, height, err, sizeof(err)) != 0) {
++
++    // Content diagnostics (no private container UUID or username in logs).
++    NSString *rootPath = self.acRootURL.path ?: @"";
++    NSString *displayRoot = rootPath;
++    NSRange docsRange = [rootPath rangeOfString:@"/Documents/"];
++    if (docsRange.location != NSNotFound) {
++        displayRoot = [@"~" stringByAppendingString:[rootPath substringFromIndex:docsRange.location]];
++    }
++    NSString *driverDir = [rootPath stringByAppendingPathComponent:@"content/driver"];
++    NSString *driverFile = [driverDir stringByAppendingPathComponent:@"driver_no_HANS.kn5"];
++    NSFileManager *contentFM = NSFileManager.defaultManager;
++    BOOL isDir = NO;
++    BOOL driverDirExists = [contentFM fileExistsAtPath:driverDir isDirectory:&isDir] && isDir;
++    BOOL driverFileExists = [contentFM fileExistsAtPath:driverFile];
++    unsigned long long driverSize = driverFileExists
++        ? [[contentFM attributesOfItemAtPath:driverFile error:nil][NSFileSize] unsignedLongLongValue] : 0;
++    NSLog(@"[CONTENT] Content root: %@", displayRoot);
++    NSLog(@"[CONTENT] Driver directory: %@ (exists: %@)",
++          [displayRoot stringByAppendingPathComponent:@"content/driver"], driverDirExists ? @"true" : @"false");
++    NSLog(@"[CONTENT] Requested driver: resolved by renderer from the car's driver3d.ini; verifying driver_no_HANS.kn5");
++    NSLog(@"[CONTENT] Driver file exists: %@", driverFileExists ? @"true" : @"false");
++    NSLog(@"[CONTENT] Driver file size: %llu", driverSize);
++    if (!driverDirExists) {
++        [self showMessage:@"Content pack is missing content/driver. Re-import the full Content Pack "
++                           "(the renderer needs real AC driver models)."];
++        return;
++    }
++    int renderResult = ac_ios_render_init(ac_pal_bridge_session(), width, height, err, sizeof(err));
++    if (renderResult != 0) {
++        NSLog(@"[RENDERER] Driver asset load result: FAILED тАФ %s", err);
+         [self showMessage:[NSString stringWithFormat:@"Real AC renderer FAILED: %s", err]]; return;
+     }
++    NSLog(@"[RENDERER] Driver asset load result: OK тАФ real AC scene initialized");
+     self.renderReady = YES;
+ 
+     char audioErr[256] = {0};
+@@ -991,6 +1032,7 @@
+     self.menuContainer.hidden = YES;
+     [self hideDrivingUI:NO];
+     self.messageLabel.hidden = YES;
++    self.messageCloseButton.hidden = YES;
+     self.debugLabel.hidden = !self.settings.diagnosticsEnabled;
+     self.hudPanel.hidden = !self.settings.hudVisible;
+     self.timingPanel.hidden = (self.settings.gameMode != 1 && self.settings.gameMode != 2);
+@@ -1136,9 +1178,15 @@
+ - (void)showMessage:(NSString *)text {
+     self.messageLabel.text = text;
+     self.messageLabel.hidden = NO;
++    self.messageCloseButton.hidden = NO;
+     [self.view bringSubviewToFront:self.messageLabel];
+ }
+ 
++- (void)dismissMessage {
++    self.messageLabel.hidden = YES;
++    self.messageCloseButton.hidden = YES;
++}
++
+ #pragma mark - Content metadata / thumbnails
+ 
+ /// AC's ui_car.json contains raw newlines inside strings, so strict JSON
+diff --git a/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/driver.rs b/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/driver.rs
+index f8b6a3d..606b343 100644
+--- a/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/driver.rs
++++ b/third_party/rustyAC-src/rustyAC-master/crates/rustyac-render/src/driver.rs
+@@ -28,6 +28,18 @@ use crate::state::CarPhysicsState;
+ 
+ const DEG: f32 = f32::from_bits(0x3c8e_f998);
+ 
++/// Candidate driver model files in AC's own order. `is_hr` means the full
++/// model; otherwise the low-detail `_B` is tried first, then the full one.
++/// Kept pure so the iOS fallback can be regression-tested without a GPU.
++pub(crate) fn driver_candidate_files(game: &str, model: &str, is_hr: bool) -> Vec<String> {
++    let full = format!("{game}/content/driver/{model}.kn5");
++    if is_hr {
++        vec![full]
++    } else {
++        vec![format!("{game}/content/driver/{model}_B.kn5"), full]
++    }
++}
++
+ fn clamp01(x: f32) -> f32 {
+     if x > 1.0 {
+         1.0
+@@ -181,16 +193,26 @@ impl DriverModel {
+         }
+         println!("USING DEFAULT DRIVER SYSTEM");
+         let model_name = ini.get_string("MODEL", "NAME");
++        let candidates = driver_candidate_files(&game, &model_name, is_hr);
+         let mut is_hr = is_hr;
+-        let mut file = format!("{game}/content/driver/{model_name}{}.kn5", if is_hr { "" } else { "_B" });
+-        if !Path::new(&file).vfs_is_file() {
+-            if !is_hr {
+-                is_hr = true;
+-                file = format!("{game}/content/driver/{model_name}.kn5");
+-            } else {
+-                println!("Error: driver file '{file}' not found");
++        let mut chosen: Option<String> = None;
++        for candidate in &candidates {
++            if Path::new(candidate).vfs_is_file() {
++                chosen = Some(candidate.clone());
++                is_hr = !candidate.ends_with("_B.kn5");
++                break;
+             }
+         }
++        let Some(file) = chosen else {
++            // A missing driver model is not fatal for the scene: rustyAC
++            // already returns Ok(None) when a car has no driver3d.ini. Do the
++            // same when the imported content pack omits the model, and keep
++            // car/track/renderer running instead of aborting the whole Drive.
++            println!(concat!("[RENDERER] Driver asset load result: missing тАФ none of {:?} exists; ",
++                             "continuing without a 3D driver"), candidates);
++            return Ok(None);
++        };
++        println!("[RENDERER] Driver asset load result: loading {file}");
+         let mut kn5 = Kn5Io::new();
+         let mut skins_handled = false;
+         let mut need_skin_folder = true;
+@@ -676,3 +698,23 @@ impl DriverModel {
+         scene.nodes[neck].matrix = xm_matrix_multiply(&r3, &self.next_rest_matrix);
+     }
+ }
++
++#[cfg(test)]
++mod driver_asset_tests {
++    use super::*;
++
++    #[test]
++    fn low_detail_model_falls_back_to_full_model() {
++        let files = driver_candidate_files("/AC", "driver_no_HANS", false);
++        assert_eq!(files, vec![
++            "/AC/content/driver/driver_no_HANS_B.kn5".to_string(),
++            "/AC/content/driver/driver_no_HANS.kn5".to_string(),
++        ]);
++    }
++
++    #[test]
++    fn high_detail_only_tries_the_full_model() {
++        assert_eq!(driver_candidate_files("/AC", "driver_80", true),
++                   vec!["/AC/content/driver/driver_80.kn5".to_string()]);
++    }
++}

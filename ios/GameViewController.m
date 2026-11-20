@@ -288,6 +288,7 @@
 @property (nonatomic, strong) UILabel *timingLaps;
 @property (nonatomic, strong) UILabel *debugLabel;
 @property (nonatomic, strong) UILabel *messageLabel;
+@property (nonatomic, strong) UIButton *messageCloseButton;
 
 // Session state
 @property (nonatomic, assign) BOOL sessionOpen;
@@ -611,7 +612,16 @@
     self.messageLabel.textColor = [UIColor colorWithRed:1 green:0.55 blue:0.35 alpha:1];
     self.messageLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
     self.messageLabel.layer.cornerRadius = 6;
+    self.messageLabel.userInteractionEnabled = YES;
     [self.view addSubview:self.messageLabel];
+
+    self.messageCloseButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [self.messageCloseButton setTitle:@"✕" forState:UIControlStateNormal];
+    [self.messageCloseButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.messageCloseButton.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    [self.messageCloseButton addTarget:self action:@selector(dismissMessage)
+                      forControlEvents:UIControlEventTouchUpInside];
+    [self.messageLabel addSubview:self.messageCloseButton];
 }
 
 #pragma mark - Layout
@@ -755,6 +765,7 @@
 
     self.debugLabel.frame = CGRectMake(safe.left + 12, safe.top + 144, MIN(310, w * 0.34), 170);
     self.messageLabel.frame = CGRectMake((w - 520) / 2, (h - 80) / 2, 520, 80);
+    self.messageCloseButton.frame = CGRectMake(492, 4, 24, 24);
 }
 
 #pragma mark - Navigation
@@ -783,7 +794,7 @@
     for (UIView *v in @[self.wheel, self.gasPedal, self.brakePedal, self.gearUpButton,
                         self.gearDownButton, self.handbrakeButton, self.cameraButton,
                         self.menuButton, self.gearboxButton, self.hudPanel, self.timingPanel,
-                        self.debugLabel, self.messageLabel]) v.hidden = hidden;
+                        self.debugLabel, self.messageLabel, self.messageCloseButton]) v.hidden = hidden;
 }
 
 - (void)menuButtonTapped {
@@ -959,9 +970,39 @@
     uint64_t features[4] = {0};
     ac_ios_metal_device_info(features);
     self.metalFeatures = (unsigned long long)features[0];
-    if (ac_ios_render_init(ac_pal_bridge_session(), width, height, err, sizeof(err)) != 0) {
+
+    // Content diagnostics (no private container UUID or username in logs).
+    NSString *rootPath = self.acRootURL.path ?: @"";
+    NSString *displayRoot = rootPath;
+    NSRange docsRange = [rootPath rangeOfString:@"/Documents/"];
+    if (docsRange.location != NSNotFound) {
+        displayRoot = [@"~" stringByAppendingString:[rootPath substringFromIndex:docsRange.location]];
+    }
+    NSString *driverDir = [rootPath stringByAppendingPathComponent:@"content/driver"];
+    NSString *driverFile = [driverDir stringByAppendingPathComponent:@"driver_no_HANS.kn5"];
+    NSFileManager *contentFM = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    BOOL driverDirExists = [contentFM fileExistsAtPath:driverDir isDirectory:&isDir] && isDir;
+    BOOL driverFileExists = [contentFM fileExistsAtPath:driverFile];
+    unsigned long long driverSize = driverFileExists
+        ? [[contentFM attributesOfItemAtPath:driverFile error:nil][NSFileSize] unsignedLongLongValue] : 0;
+    NSLog(@"[CONTENT] Content root: %@", displayRoot);
+    NSLog(@"[CONTENT] Driver directory: %@ (exists: %@)",
+          [displayRoot stringByAppendingPathComponent:@"content/driver"], driverDirExists ? @"true" : @"false");
+    NSLog(@"[CONTENT] Requested driver: resolved by renderer from the car's driver3d.ini; verifying driver_no_HANS.kn5");
+    NSLog(@"[CONTENT] Driver file exists: %@", driverFileExists ? @"true" : @"false");
+    NSLog(@"[CONTENT] Driver file size: %llu", driverSize);
+    if (!driverDirExists) {
+        [self showMessage:@"Content pack is missing content/driver. Re-import the full Content Pack "
+                           "(the renderer needs real AC driver models)."];
+        return;
+    }
+    int renderResult = ac_ios_render_init(ac_pal_bridge_session(), width, height, err, sizeof(err));
+    if (renderResult != 0) {
+        NSLog(@"[RENDERER] Driver asset load result: FAILED — %s", err);
         [self showMessage:[NSString stringWithFormat:@"Real AC renderer FAILED: %s", err]]; return;
     }
+    NSLog(@"[RENDERER] Driver asset load result: OK — real AC scene initialized");
     self.renderReady = YES;
 
     char audioErr[256] = {0};
@@ -991,6 +1032,7 @@
     self.menuContainer.hidden = YES;
     [self hideDrivingUI:NO];
     self.messageLabel.hidden = YES;
+    self.messageCloseButton.hidden = YES;
     self.debugLabel.hidden = !self.settings.diagnosticsEnabled;
     self.hudPanel.hidden = !self.settings.hudVisible;
     self.timingPanel.hidden = (self.settings.gameMode != 1 && self.settings.gameMode != 2);
@@ -1136,7 +1178,13 @@
 - (void)showMessage:(NSString *)text {
     self.messageLabel.text = text;
     self.messageLabel.hidden = NO;
+    self.messageCloseButton.hidden = NO;
     [self.view bringSubviewToFront:self.messageLabel];
+}
+
+- (void)dismissMessage {
+    self.messageLabel.hidden = YES;
+    self.messageCloseButton.hidden = YES;
 }
 
 #pragma mark - Content metadata / thumbnails

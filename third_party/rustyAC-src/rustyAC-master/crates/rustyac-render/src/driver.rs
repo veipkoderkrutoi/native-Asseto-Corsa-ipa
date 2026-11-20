@@ -28,6 +28,18 @@ use crate::state::CarPhysicsState;
 
 const DEG: f32 = f32::from_bits(0x3c8e_f998);
 
+/// Candidate driver model files in AC's own order. `is_hr` means the full
+/// model; otherwise the low-detail `_B` is tried first, then the full one.
+/// Kept pure so the iOS fallback can be regression-tested without a GPU.
+pub(crate) fn driver_candidate_files(game: &str, model: &str, is_hr: bool) -> Vec<String> {
+    let full = format!("{game}/content/driver/{model}.kn5");
+    if is_hr {
+        vec![full]
+    } else {
+        vec![format!("{game}/content/driver/{model}_B.kn5"), full]
+    }
+}
+
 fn clamp01(x: f32) -> f32 {
     if x > 1.0 {
         1.0
@@ -181,16 +193,26 @@ impl DriverModel {
         }
         println!("USING DEFAULT DRIVER SYSTEM");
         let model_name = ini.get_string("MODEL", "NAME");
+        let candidates = driver_candidate_files(&game, &model_name, is_hr);
         let mut is_hr = is_hr;
-        let mut file = format!("{game}/content/driver/{model_name}{}.kn5", if is_hr { "" } else { "_B" });
-        if !Path::new(&file).vfs_is_file() {
-            if !is_hr {
-                is_hr = true;
-                file = format!("{game}/content/driver/{model_name}.kn5");
-            } else {
-                println!("Error: driver file '{file}' not found");
+        let mut chosen: Option<String> = None;
+        for candidate in &candidates {
+            if Path::new(candidate).vfs_is_file() {
+                chosen = Some(candidate.clone());
+                is_hr = !candidate.ends_with("_B.kn5");
+                break;
             }
         }
+        let Some(file) = chosen else {
+            // A missing driver model is not fatal for the scene: rustyAC
+            // already returns Ok(None) when a car has no driver3d.ini. Do the
+            // same when the imported content pack omits the model, and keep
+            // car/track/renderer running instead of aborting the whole Drive.
+            println!(concat!("[RENDERER] Driver asset load result: missing — none of {:?} exists; ",
+                             "continuing without a 3D driver"), candidates);
+            return Ok(None);
+        };
+        println!("[RENDERER] Driver asset load result: loading {file}");
         let mut kn5 = Kn5Io::new();
         let mut skins_handled = false;
         let mut need_skin_folder = true;
@@ -674,5 +696,25 @@ impl DriverModel {
         let r2 = xm_matrix_multiply(&head, &yaw);
         let r3 = xm_matrix_multiply(&r1, &r2);
         scene.nodes[neck].matrix = xm_matrix_multiply(&r3, &self.next_rest_matrix);
+    }
+}
+
+#[cfg(test)]
+mod driver_asset_tests {
+    use super::*;
+
+    #[test]
+    fn low_detail_model_falls_back_to_full_model() {
+        let files = driver_candidate_files("/AC", "driver_no_HANS", false);
+        assert_eq!(files, vec![
+            "/AC/content/driver/driver_no_HANS_B.kn5".to_string(),
+            "/AC/content/driver/driver_no_HANS.kn5".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn high_detail_only_tries_the_full_model() {
+        assert_eq!(driver_candidate_files("/AC", "driver_80", true),
+                   vec!["/AC/content/driver/driver_80.kn5".to_string()]);
     }
 }
