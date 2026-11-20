@@ -1,4 +1,21 @@
-# HANDOFF — Assetto Corsa iOS Port (Phase 11.7 Functional UI + Content)
+# HANDOFF — Assetto Corsa iOS Port (Hotfix 11.8 driver asset)
+
+## PHASE 11.8 HOTFIX
+
+- Ошибка: `content/driver/driver_no_HANS.kn5: No such file or directory`.
+  Файл есть в игре и в локальном паке, но **импортер не копировал `content/driver`**.
+- Импортер теперь копирует `content/driver`, `content/texture`, `fonts`,
+  `objects3D`, `weather` + `system`; результат показывает количество папок.
+- `driver.rs`: несуществующая модель водителя больше не убивает инициализацию —
+  `Ok(None)` + лог `[RENDERER] Driver asset load result: missing ...`, без фейковой геометрии.
+- Диагностика `[CONTENT] ...` в `driveTapped` (без UDID/имени пользователя),
+  overlay ошибки теперь закрывается кнопкой ✕.
+- Маленький патч для телефона (без перекачки всего пака):
+  `C:\Users\User\Desktop\AC-iOS-content-pack\driver-fix.zip` — 31.18 MiB, 57 файлов.
+- Тесты: rustyac-render 44 PASS, ac-ios-runtime 9 PASS, iOS check PASS,
+  verify 52/52, prepush PASS. Отчёт `phase11_8/PHASE11_8_REPORT.md`,
+  патч `patches/phase11_8/`, коммит `93bcd57`.
+- **REAL DEVICE DRIVE VALIDATION: NOT CONFIRMED.**
 
 GitHub:
 - Latest release: `v0.11.7-phase11.7` — unsigned IPA + release notes:
@@ -142,7 +159,7 @@ AC-сцену, машина едет, телеметрия/камеры рабо
 - Реальный `full_frame` load: 6/6 OK (5 новых машин @ magione + lotus @ trento).
 - Garage показывает РЕАЛЬНЫЕ имена из ui_car.json и превью из пользовательского
   контента (84×48, кэш), без загрузки KN5 ради карточек.
-- IPA: CI `44600565798` success, SHA `472307943e…`, 4,359,044 B; старая IPA
+- IPA: CI `44704970168` success, SHA `472307943e…`, 4,360,000 B; старая IPA
   сохранена как `AC-iOS-Prot-unsigned-PrePhase11.7-WORKING-backup.ipa`.
 - **REAL DEVICE VALIDATION: NOT CONFIRMED** — popup/импорт/новый контент нужно
   проверить на iPhone.

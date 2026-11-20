@@ -16,10 +16,10 @@ Native ARM64 build for iPhone 13 Pro Max (iOS 16+).
 ## Artifact
 
 - File: `AC-iOS-Prot-unsigned.ipa`
-- Size: 4,359,044 bytes
-- SHA-256: `0546201c9bca33084a6c8095258ac8edfd0c55cd7a0a3a46a7375d3190ea4171`
+- Size: 4,360,000 bytes
+- SHA-256: `78366fb7d9c95d27f29e4f1d6bbb4773116b965f919a73888aca82e4e121025f`
 - Structurally verified unsigned IPA; re-sign with Sideloadly before installing.
-- Commit: `f8aa63c`, CI run `44600565798` (`macos-26-intel`, success).
+- Commit: `93bcd57`, CI run `44704970168` (`macos-26-intel`, success).
 - This build fixes the main-menu buttons: all screen containers now receive a
   real frame, so UIKit hit-testing reaches every button.
 
