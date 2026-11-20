@@ -1,0 +1,225 @@
+﻿diff --git a/ios/ACImportPopup.m b/ios/ACImportPopup.m
+index 75c6fdb..bac0e2a 100644
+--- a/ios/ACImportPopup.m
++++ b/ios/ACImportPopup.m
+@@ -225,6 +225,21 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+     return n;
+ }
+ 
++- (NSArray<NSString *> *)requiredPathsFromBundle {
++    NSURL *url = [[NSBundle mainBundle] URLForResource:@"content_requirements" withExtension:@"json"];
++    if (!url) return @[];
++    NSError *error = nil;
++    NSDictionary *doc = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:url]
++                                                       options:0 error:&error];
++    NSMutableSet *all = [NSMutableSet set];
++    NSDictionary *combos = doc[@"combinations"];
++    for (NSDictionary *entry in combos.allValues) {
++        NSArray *paths = entry[@"required"];
++        if ([paths isKindOfClass:NSArray.class]) [all addObjectsFromArray:paths];
++    }
++    return all.allObjects;
++}
++
+ - (void)importFrom:(NSURL *)picked {
+     NSURL *root = [self resolveContentRoot:picked];
+     if (!root) {
+@@ -297,6 +312,9 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+     [fm createDirectoryAtPath:[destRoot URLByAppendingPathComponent:@"system" isDirectory:YES].path
+  withIntermediateDirectories:YES attributes:nil error:nil];
+ 
++    NSArray<NSString *> *manifestPaths = [self requiredPathsFromBundle];
++    NSURL *manifestBase = [root.path hasSuffix:@"/content"] ? [root URLByDeletingLastPathComponent] : root;
++
+     NSUInteger total = [self fileCountIn:srcSystem];
+     for (NSURL *u in shared) total += [self fileCountIn:u];
+     for (NSURL *u in cars) total += [self fileCountIn:u];
+@@ -326,7 +344,7 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+         }
+         done += [self fileCountIn:dst];
+         dispatch_async(dispatch_get_main_queue(), ^{
+-            _progress.progress = (float)done / (float)total;
++            _progress.progress = MIN(1.0f, (float)done / (float)total);
+         });
+     };
+     // system/ is small (cfg + shaders, ~23 MiB) and must be complete.
+@@ -345,6 +363,26 @@ typedef NS_ENUM(NSInteger, ACImportState) {
+     for (NSURL *car in cars) copyOne(car, [destCars URLByAppendingPathComponent:car.lastPathComponent isDirectory:YES]);
+     for (NSURL *track in tracks) copyOne(track, [destTracks URLByAppendingPathComponent:track.lastPathComponent isDirectory:YES]);
+ 
++    // Dependency manifest: copy every required file that is still missing or
++    // has a different size. This is idempotent and supports incremental import
++    // without re-copying the whole 1.9 GB pack.
++    NSUInteger manifestAdded = 0;
++    for (NSString *relative in manifestPaths) {
++        if (copyError) break;
++        NSURL *src = [manifestBase URLByAppendingPathComponent:relative isDirectory:NO];
++        NSURL *dst = [destRoot URLByAppendingPathComponent:relative isDirectory:NO];
++        if (![fm fileExistsAtPath:src.path]) continue;
++        NSDictionary *srcAttrs = [fm attributesOfItemAtPath:src.path error:nil];
++        NSDictionary *dstAttrs = [fm attributesOfItemAtPath:dst.path error:nil];
++        if (dstAttrs && [srcAttrs[NSFileSize] unsignedLongLongValue] == [dstAttrs[NSFileSize] unsignedLongLongValue]) continue;
++        [fm createDirectoryAtPath:dst.path.stringByDeletingLastPathComponent
++  withIntermediateDirectories:YES attributes:nil error:nil];
++        if (![fm copyItemAtURL:src toURL:dst error:&copyError]) break;
++        manifestAdded++;
++        done++;
++    }
++    if (manifestAdded) NSLog(@"[PREFLIGHT] Importer added %lu manifest dependencies", (unsigned long)manifestAdded);
++
+     if (copyError) {
+         [self failOnMain:[NSString stringWithFormat:@"Copy failed: %@", copyError.localizedDescription]];
+         return;
+diff --git a/ios/GameViewController.m b/ios/GameViewController.m
+index cf2ab6b..b882cba 100644
+--- a/ios/GameViewController.m
++++ b/ios/GameViewController.m
+@@ -12,6 +12,7 @@
+ #import "ACSettings.h"
+ #import "ACTiming.h"
+ #import "ACImportPopup.h"
++#import "ACContentValidator.h"
+ #import <math.h>
+ #import <QuartzCore/QuartzCore.h>
+ 
+@@ -289,6 +290,11 @@
+ @property (nonatomic, strong) UILabel *debugLabel;
+ @property (nonatomic, strong) UILabel *messageLabel;
+ @property (nonatomic, strong) UIButton *messageCloseButton;
++@property (nonatomic, strong) UIView *validationPanel;
++@property (nonatomic, strong) UILabel *validationTitle;
++@property (nonatomic, strong) UILabel *validationCount;
++@property (nonatomic, strong) UITextView *validationText;
++@property (nonatomic, strong) UIButton *validationClose;
+ 
+ // Session state
+ @property (nonatomic, assign) BOOL sessionOpen;
+@@ -622,6 +628,34 @@
+     [self.messageCloseButton addTarget:self action:@selector(dismissMessage)
+                       forControlEvents:UIControlEventTouchUpInside];
+     [self.messageLabel addSubview:self.messageCloseButton];
++
++    self.validationPanel = [[ACPanel alloc] initWithFrame:CGRectZero];
++    self.validationPanel.hidden = YES;
++    [self.view addSubview:self.validationPanel];
++    self.validationTitle = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.validationTitle.text = @"CONTENT VALIDATION FAILED";
++    self.validationTitle.textColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.15 alpha:1];
++    self.validationTitle.font = [UIFont boldSystemFontOfSize:15];
++    [self.validationPanel addSubview:self.validationTitle];
++    self.validationCount = [[UILabel alloc] initWithFrame:CGRectZero];
++    self.validationCount.textColor = [UIColor colorWithWhite:0.85 alpha:1];
++    self.validationCount.font = [UIFont systemFontOfSize:11];
++    [self.validationPanel addSubview:self.validationCount];
++    self.validationText = [[UITextView alloc] initWithFrame:CGRectZero];
++    self.validationText.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
++    self.validationText.textColor = [UIColor colorWithWhite:0.85 alpha:1];
++    self.validationText.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:10];
++    self.validationText.editable = NO;
++    [self.validationPanel addSubview:self.validationText];
++    self.validationClose = [UIButton buttonWithType:UIButtonTypeCustom];
++    [self.validationClose setTitle:@"CLOSE" forState:UIControlStateNormal];
++    self.validationClose.titleLabel.font = [UIFont boldSystemFontOfSize:12];
++    [self.validationClose setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
++    self.validationClose.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1];
++    self.validationClose.layer.cornerRadius = 4;
++    [self.validationClose addTarget:self action:@selector(closeValidationPanel)
++                   forControlEvents:UIControlEventTouchUpInside];
++    [self.validationPanel addSubview:self.validationClose];
+ }
+ 
+ #pragma mark - Layout
+@@ -766,6 +800,13 @@
+     self.debugLabel.frame = CGRectMake(safe.left + 12, safe.top + 144, MIN(310, w * 0.34), 170);
+     self.messageLabel.frame = CGRectMake((w - 520) / 2, (h - 80) / 2, 520, 80);
+     self.messageCloseButton.frame = CGRectMake(492, 4, 24, 24);
++    CGFloat vw = MIN(560, w - 40);
++    CGFloat vh = MIN(320, h - 60);
++    self.validationPanel.frame = CGRectMake((w - vw) / 2, (h - vh) / 2, vw, vh);
++    self.validationTitle.frame = CGRectMake(14, 10, vw - 28, 22);
++    self.validationCount.frame = CGRectMake(14, 34, vw - 28, 18);
++    self.validationText.frame = CGRectMake(14, 58, vw - 28, vh - 108);
++    self.validationClose.frame = CGRectMake(vw - 104, vh - 42, 90, 32);
+ }
+ 
+ #pragma mark - Navigation
+@@ -794,7 +835,8 @@
+     for (UIView *v in @[self.wheel, self.gasPedal, self.brakePedal, self.gearUpButton,
+                         self.gearDownButton, self.handbrakeButton, self.cameraButton,
+                         self.menuButton, self.gearboxButton, self.hudPanel, self.timingPanel,
+-                        self.debugLabel, self.messageLabel, self.messageCloseButton]) v.hidden = hidden;
++                        self.debugLabel, self.messageLabel, self.messageCloseButton,
++                        self.validationPanel]) v.hidden = hidden;
+ }
+ 
+ - (void)menuButtonTapped {
+@@ -945,6 +987,27 @@
+ #pragma mark - Drive lifecycle
+ 
+ - (void)driveTapped {
++    if (!self.acRootURL) { [self showMessage:@"Import your Assetto Corsa folder first"]; return; }
++    [self showMessage:@"Validating content dependenciesтАж"];
++    __weak typeof(self) weakSelf = self;
++    [[ACContentValidator shared] validateRoot:self.acRootURL
++                                          car:self.settings.selectedCar
++                                        track:self.settings.selectedTrack
++                                   completion:^(NSArray<NSString *> *missingRequired,
++                                                NSArray<NSString *> *missingOptional,
++                                                NSUInteger checked) {
++        __strong typeof(weakSelf) self = weakSelf;
++        if (!self) return;
++        [self dismissMessage];
++        if (missingRequired.count > 0) {
++            [self showValidationFailed:missingRequired optional:missingOptional checked:checked];
++            return;
++        }
++        [self startDriveSession];
++    }];
++}
++
++- (void)startDriveSession {
+     if (!self.acRootURL) { [self showMessage:@"Import your Assetto Corsa folder first"]; return; }
+     self.lastFrameTime = 0;
+     ac_ios_render_destroy();
+@@ -1187,6 +1250,27 @@
+     self.messageCloseButton.hidden = YES;
+ }
+ 
++- (void)showValidationFailed:(NSArray<NSString *> *)required
++                    optional:(NSArray<NSString *> *)optional
++                     checked:(NSUInteger)checked {
++    self.validationCount.text = [NSString stringWithFormat:@"Missing %lu required of %lu checked resources",
++                                 (unsigned long)required.count, (unsigned long)checked];
++    NSMutableString *details = [NSMutableString string];
++    [details appendString:@"Missing required resources:\n"];
++    for (NSString *path in required) [details appendFormat:@"- %@\n", path];
++    if (optional.count) {
++        [details appendFormat:@"\nOptional (renderer will continue without them): %lu\n", (unsigned long)optional.count];
++        for (NSString *path in optional) [details appendFormat:@"- %@\n", path];
++    }
++    self.validationText.text = details;
++    self.validationPanel.hidden = NO;
++    [self.view bringSubviewToFront:self.validationPanel];
++}
++
++- (void)closeValidationPanel {
++    self.validationPanel.hidden = YES;
++}
++
+ #pragma mark - Content metadata / thumbnails
+ 
+ /// AC's ui_car.json contains raw newlines inside strings, so strict JSON
+diff --git a/ios/project.yml b/ios/project.yml
+index b7f34bf..ce482be 100644
+--- a/ios/project.yml
++++ b/ios/project.yml
+@@ -28,6 +28,9 @@ targets:
+       - path: ACTiming.m
+       - path: ACImportPopup.h
+       - path: ACImportPopup.m
++      - path: ACContentValidator.h
++      - path: ACContentValidator.m
++      - path: content_requirements.json
+       - path: ios_bridge.m
+       - path: ../core/ac_pal_bridge.c
+       - path: ../core/ac_pal_bridge.h

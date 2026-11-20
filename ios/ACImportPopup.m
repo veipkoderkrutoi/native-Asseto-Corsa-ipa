@@ -225,6 +225,21 @@ typedef NS_ENUM(NSInteger, ACImportState) {
     return n;
 }
 
+- (NSArray<NSString *> *)requiredPathsFromBundle {
+    NSURL *url = [[NSBundle mainBundle] URLForResource:@"content_requirements" withExtension:@"json"];
+    if (!url) return @[];
+    NSError *error = nil;
+    NSDictionary *doc = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:url]
+                                                       options:0 error:&error];
+    NSMutableSet *all = [NSMutableSet set];
+    NSDictionary *combos = doc[@"combinations"];
+    for (NSDictionary *entry in combos.allValues) {
+        NSArray *paths = entry[@"required"];
+        if ([paths isKindOfClass:NSArray.class]) [all addObjectsFromArray:paths];
+    }
+    return all.allObjects;
+}
+
 - (void)importFrom:(NSURL *)picked {
     NSURL *root = [self resolveContentRoot:picked];
     if (!root) {
@@ -297,6 +312,9 @@ typedef NS_ENUM(NSInteger, ACImportState) {
     [fm createDirectoryAtPath:[destRoot URLByAppendingPathComponent:@"system" isDirectory:YES].path
  withIntermediateDirectories:YES attributes:nil error:nil];
 
+    NSArray<NSString *> *manifestPaths = [self requiredPathsFromBundle];
+    NSURL *manifestBase = [root.path hasSuffix:@"/content"] ? [root URLByDeletingLastPathComponent] : root;
+
     NSUInteger total = [self fileCountIn:srcSystem];
     for (NSURL *u in shared) total += [self fileCountIn:u];
     for (NSURL *u in cars) total += [self fileCountIn:u];
@@ -326,7 +344,7 @@ typedef NS_ENUM(NSInteger, ACImportState) {
         }
         done += [self fileCountIn:dst];
         dispatch_async(dispatch_get_main_queue(), ^{
-            _progress.progress = (float)done / (float)total;
+            _progress.progress = MIN(1.0f, (float)done / (float)total);
         });
     };
     // system/ is small (cfg + shaders, ~23 MiB) and must be complete.
@@ -344,6 +362,26 @@ typedef NS_ENUM(NSInteger, ACImportState) {
     }
     for (NSURL *car in cars) copyOne(car, [destCars URLByAppendingPathComponent:car.lastPathComponent isDirectory:YES]);
     for (NSURL *track in tracks) copyOne(track, [destTracks URLByAppendingPathComponent:track.lastPathComponent isDirectory:YES]);
+
+    // Dependency manifest: copy every required file that is still missing or
+    // has a different size. This is idempotent and supports incremental import
+    // without re-copying the whole 1.9 GB pack.
+    NSUInteger manifestAdded = 0;
+    for (NSString *relative in manifestPaths) {
+        if (copyError) break;
+        NSURL *src = [manifestBase URLByAppendingPathComponent:relative isDirectory:NO];
+        NSURL *dst = [destRoot URLByAppendingPathComponent:relative isDirectory:NO];
+        if (![fm fileExistsAtPath:src.path]) continue;
+        NSDictionary *srcAttrs = [fm attributesOfItemAtPath:src.path error:nil];
+        NSDictionary *dstAttrs = [fm attributesOfItemAtPath:dst.path error:nil];
+        if (dstAttrs && [srcAttrs[NSFileSize] unsignedLongLongValue] == [dstAttrs[NSFileSize] unsignedLongLongValue]) continue;
+        [fm createDirectoryAtPath:dst.path.stringByDeletingLastPathComponent
+  withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![fm copyItemAtURL:src toURL:dst error:&copyError]) break;
+        manifestAdded++;
+        done++;
+    }
+    if (manifestAdded) NSLog(@"[PREFLIGHT] Importer added %lu manifest dependencies", (unsigned long)manifestAdded);
 
     if (copyError) {
         [self failOnMain:[NSString stringWithFormat:@"Copy failed: %@", copyError.localizedDescription]];

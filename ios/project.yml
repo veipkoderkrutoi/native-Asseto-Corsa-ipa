@@ -28,6 +28,9 @@ targets:
       - path: ACTiming.m
       - path: ACImportPopup.h
       - path: ACImportPopup.m
+      - path: ACContentValidator.h
+      - path: ACContentValidator.m
+      - path: content_requirements.json
       - path: ios_bridge.m
       - path: ../core/ac_pal_bridge.c
       - path: ../core/ac_pal_bridge.h

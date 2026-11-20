@@ -12,6 +12,7 @@
 #import "ACSettings.h"
 #import "ACTiming.h"
 #import "ACImportPopup.h"
+#import "ACContentValidator.h"
 #import <math.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -289,6 +290,11 @@
 @property (nonatomic, strong) UILabel *debugLabel;
 @property (nonatomic, strong) UILabel *messageLabel;
 @property (nonatomic, strong) UIButton *messageCloseButton;
+@property (nonatomic, strong) UIView *validationPanel;
+@property (nonatomic, strong) UILabel *validationTitle;
+@property (nonatomic, strong) UILabel *validationCount;
+@property (nonatomic, strong) UITextView *validationText;
+@property (nonatomic, strong) UIButton *validationClose;
 
 // Session state
 @property (nonatomic, assign) BOOL sessionOpen;
@@ -622,6 +628,34 @@
     [self.messageCloseButton addTarget:self action:@selector(dismissMessage)
                       forControlEvents:UIControlEventTouchUpInside];
     [self.messageLabel addSubview:self.messageCloseButton];
+
+    self.validationPanel = [[ACPanel alloc] initWithFrame:CGRectZero];
+    self.validationPanel.hidden = YES;
+    [self.view addSubview:self.validationPanel];
+    self.validationTitle = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.validationTitle.text = @"CONTENT VALIDATION FAILED";
+    self.validationTitle.textColor = [UIColor colorWithRed:0.9 green:0.2 blue:0.15 alpha:1];
+    self.validationTitle.font = [UIFont boldSystemFontOfSize:15];
+    [self.validationPanel addSubview:self.validationTitle];
+    self.validationCount = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.validationCount.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+    self.validationCount.font = [UIFont systemFontOfSize:11];
+    [self.validationPanel addSubview:self.validationCount];
+    self.validationText = [[UITextView alloc] initWithFrame:CGRectZero];
+    self.validationText.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
+    self.validationText.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+    self.validationText.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:10];
+    self.validationText.editable = NO;
+    [self.validationPanel addSubview:self.validationText];
+    self.validationClose = [UIButton buttonWithType:UIButtonTypeCustom];
+    [self.validationClose setTitle:@"CLOSE" forState:UIControlStateNormal];
+    self.validationClose.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [self.validationClose setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.validationClose.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1];
+    self.validationClose.layer.cornerRadius = 4;
+    [self.validationClose addTarget:self action:@selector(closeValidationPanel)
+                   forControlEvents:UIControlEventTouchUpInside];
+    [self.validationPanel addSubview:self.validationClose];
 }
 
 #pragma mark - Layout
@@ -766,6 +800,13 @@
     self.debugLabel.frame = CGRectMake(safe.left + 12, safe.top + 144, MIN(310, w * 0.34), 170);
     self.messageLabel.frame = CGRectMake((w - 520) / 2, (h - 80) / 2, 520, 80);
     self.messageCloseButton.frame = CGRectMake(492, 4, 24, 24);
+    CGFloat vw = MIN(560, w - 40);
+    CGFloat vh = MIN(320, h - 60);
+    self.validationPanel.frame = CGRectMake((w - vw) / 2, (h - vh) / 2, vw, vh);
+    self.validationTitle.frame = CGRectMake(14, 10, vw - 28, 22);
+    self.validationCount.frame = CGRectMake(14, 34, vw - 28, 18);
+    self.validationText.frame = CGRectMake(14, 58, vw - 28, vh - 108);
+    self.validationClose.frame = CGRectMake(vw - 104, vh - 42, 90, 32);
 }
 
 #pragma mark - Navigation
@@ -794,7 +835,8 @@
     for (UIView *v in @[self.wheel, self.gasPedal, self.brakePedal, self.gearUpButton,
                         self.gearDownButton, self.handbrakeButton, self.cameraButton,
                         self.menuButton, self.gearboxButton, self.hudPanel, self.timingPanel,
-                        self.debugLabel, self.messageLabel, self.messageCloseButton]) v.hidden = hidden;
+                        self.debugLabel, self.messageLabel, self.messageCloseButton,
+                        self.validationPanel]) v.hidden = hidden;
 }
 
 - (void)menuButtonTapped {
@@ -945,6 +987,27 @@
 #pragma mark - Drive lifecycle
 
 - (void)driveTapped {
+    if (!self.acRootURL) { [self showMessage:@"Import your Assetto Corsa folder first"]; return; }
+    [self showMessage:@"Validating content dependencies…"];
+    __weak typeof(self) weakSelf = self;
+    [[ACContentValidator shared] validateRoot:self.acRootURL
+                                          car:self.settings.selectedCar
+                                        track:self.settings.selectedTrack
+                                   completion:^(NSArray<NSString *> *missingRequired,
+                                                NSArray<NSString *> *missingOptional,
+                                                NSUInteger checked) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [self dismissMessage];
+        if (missingRequired.count > 0) {
+            [self showValidationFailed:missingRequired optional:missingOptional checked:checked];
+            return;
+        }
+        [self startDriveSession];
+    }];
+}
+
+- (void)startDriveSession {
     if (!self.acRootURL) { [self showMessage:@"Import your Assetto Corsa folder first"]; return; }
     self.lastFrameTime = 0;
     ac_ios_render_destroy();
@@ -1185,6 +1248,27 @@
 - (void)dismissMessage {
     self.messageLabel.hidden = YES;
     self.messageCloseButton.hidden = YES;
+}
+
+- (void)showValidationFailed:(NSArray<NSString *> *)required
+                    optional:(NSArray<NSString *> *)optional
+                     checked:(NSUInteger)checked {
+    self.validationCount.text = [NSString stringWithFormat:@"Missing %lu required of %lu checked resources",
+                                 (unsigned long)required.count, (unsigned long)checked];
+    NSMutableString *details = [NSMutableString string];
+    [details appendString:@"Missing required resources:\n"];
+    for (NSString *path in required) [details appendFormat:@"- %@\n", path];
+    if (optional.count) {
+        [details appendFormat:@"\nOptional (renderer will continue without them): %lu\n", (unsigned long)optional.count];
+        for (NSString *path in optional) [details appendFormat:@"- %@\n", path];
+    }
+    self.validationText.text = details;
+    self.validationPanel.hidden = NO;
+    [self.view bringSubviewToFront:self.validationPanel];
+}
+
+- (void)closeValidationPanel {
+    self.validationPanel.hidden = YES;
 }
 
 #pragma mark - Content metadata / thumbnails
